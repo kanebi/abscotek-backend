@@ -5,9 +5,16 @@ const auth = require('../../middleware/auth');
 const {
   createProduct,
   getProducts,
+  getProductsAdmin,
   getProductById,
   updateProduct,
   deleteProduct,
+  getRelatedProducts,
+  setPublishStatus,
+  updateInventory,
+  uploadImages,
+  removeImage,
+  bulkUpsert,
 } = require('../../controllers/productController');
 
 /**
@@ -59,11 +66,8 @@ const {
  *       500:
  *         description: Server error
  */
-router.post(
-  '/',
-  [auth, [check('name', 'Name is required').not().isEmpty(), check('description', 'Description is required').not().isEmpty(), check('price', 'Price is required').isNumeric()]],
-  createProduct
-);
+// Public list
+router.get('/', getProducts);
 
 /**
  * @swagger
@@ -84,7 +88,11 @@ router.post(
  *       500:
  *         description: Server error
  */
-router.get('/', getProducts);
+// Public related
+router.get('/:id/related', getRelatedProducts);
+
+// Public detail by id or slug
+router.get('/:id', getProductById);
 
 /**
  * @swagger
@@ -112,83 +120,6 @@ router.get('/', getProducts);
  *       500:
  *         description: Server error
  */
-router.get('/:id', getProductById);
-
-/**
- * @swagger
- * /api/products/{id}:
- *   put:
- *     summary: Update a product
- *     description: Update an existing product.
- *     tags: [Products]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         schema:
- *           type: string
- *         required: true
- *         description: The product ID.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               name:
- *                 type: string
- *               description:
- *                 type: string
- *               price:
- *                 type: number
- *               image:
- *                 type: string
- *     responses:
- *       200:
- *         description: The updated product
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Product'
- *       400:
- *         description: Bad request
- *       401:
- *         description: Unauthorized
- *       404:
- *         description: Product not found
- *       500:
- *         description: Server error
- */
-router.put('/:id', auth, updateProduct);
-
-/**
- * @swagger
- * /api/products/{id}:
- *   delete:
- *     summary: Delete a product
- *     description: Delete a product by its ID.
- *     tags: [Products]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         schema:
- *           type: string
- *         required: true
- *         description: The product ID.
- *     responses:
- *       200:
- *         description: Product removed
- *       401:
- *         description: Unauthorized
- *       404:
- *         description: Product not found
- *       500:
- *         description: Server error
- */
-router.delete('/:id', auth, deleteProduct);
+// Admin routes are defined under /api/admin/products in a separate router
 
 module.exports = router;

@@ -14,6 +14,12 @@
  *         email:
  *           type: string
  *           description: The user's email.
+ *         walletAddress:
+ *           type: string
+ *           description: The user's wallet address.
+ *         role:
+ *           type: string
+ *           description: The user's role.
  *         date:
  *           type: string
  *           format: date-time
@@ -29,7 +35,7 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const config = require('config');
+const jwtSecret = process.env.JWT_SECRET || 'supersecretjwttoken';
 const { check, validationResult } = require('express-validator');
 const auth = require('../../middleware/auth');
 
@@ -91,7 +97,7 @@ router.get('/', auth, async (req, res) => {
  *                 format: password
  *     responses:
  *       200:
- *         description: The JWT token
+ *         description: The JWT token and user info
  *         content:
  *           application/json:
  *             schema:
@@ -99,6 +105,8 @@ router.get('/', auth, async (req, res) => {
  *               properties:
  *                 token:
  *                   type: string
+ *                 user:
+ *                   $ref: '#/components/schemas/User'
  *       400:
  *         description: Invalid credentials or bad request
  *       500:
@@ -131,19 +139,37 @@ router.post(
         return res.status(400).json({ errors: [{ msg: 'Invalid Credentials' }] });
       }
 
+      // Update last login
+      user.lastLogin = new Date();
+      await user.save();
+
+      // Create JWT payload with user info
       const payload = {
         user: {
           id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          walletAddress: user.walletAddress
         },
       };
 
       jwt.sign(
         payload,
-        config.get('jwtSecret'),
-        { expiresIn: 360000 },
+        jwtSecret,
+        { expiresIn: '24h' }, // 24 hour expiry
         (err, token) => {
           if (err) throw err;
-          res.json({ token });
+          res.json({ 
+            token,
+            user: {
+              id: user.id,
+              email: user.email,
+              name: user.name,
+              role: user.role,
+              walletAddress: user.walletAddress
+            }
+          });
         }
       );
     } catch (err) {

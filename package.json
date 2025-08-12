@@ -1,7 +1,10 @@
 {
   "dependencies": {
     "@builder.io/micro-agent": "^0.1.5",
+    "@google-cloud/storage": "^7.16.0",
+    "axios": "^1.11.0",
     "bcryptjs": "^3.0.2",
+    "chalk": "^4.1.2",
     "config": "^4.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.0",
@@ -9,6 +12,8 @@
     "express-validator": "^7.2.1",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.16.1",
+    "morgan": "^1.10.1",
+    "multer": "^1.4.5-lts.1",
     "resend": "^4.6.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
@@ -21,13 +26,20 @@
   "scripts": {
     "start": "node server.js",
     "server": "nodemon server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node tests/run-all.js",
+    "test:auth": "node tests/auth.test.js",
+    "test:db": "node tests/database.test.js",
+    "test:server": "node tests/server.test.js",
+    "test:jwt": "node tests/jwt.test.js",
+    "test:all": "node tests/run-all.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.0.0",
+    "hardhat": "^2.25.0",
     "nodemon": "^3.1.10"
   }
 }

@@ -1,0 +1,77 @@
+{
+  "_format": "hh-sol-cache-2",
+  "files": {
+    "C:\\Users\\KANEBI\\Desktop\\projects\\web\\abscotek\\backend\\contracts\\Order.sol": {
+      "lastModificationDate": 1752285373843,
+      "contentHash": "060dfe02e73541bfe30ef90bfc81127c",
+      "sourceName": "contracts/Order.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "Order"
+      ]
+    },
+    "C:\\Users\\KANEBI\\Desktop\\projects\\web\\abscotek\\backend\\contracts\\ProductOrder.sol": {
+      "lastModificationDate": 1751036611715,
+      "contentHash": "1eb96a195de26db96115c1d880afec8e",
+      "sourceName": "contracts/ProductOrder.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "ProductOrder"
+      ]
+    }
+  }
+}

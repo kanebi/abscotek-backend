@@ -6,10 +6,11 @@ const ReferralSchema = new mongoose.Schema({
     ref: 'user',
     required: true,
   },
+  // Only unique when set (partial index defined below)
   referredUser: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'user',
-    unique: true,
+    required: false,
   },
   referralCode: {
     type: String,
@@ -22,4 +23,10 @@ const ReferralSchema = new mongoose.Schema({
   },
 });
 
-module.exports = Referral = mongoose.model('referral', ReferralSchema);
+// Ensure referredUser is unique only when not null/undefined
+ReferralSchema.index(
+  { referredUser: 1 },
+  { unique: true, partialFilterExpression: { referredUser: { $exists: true, $ne: null } } }
+);
+
+module.exports = mongoose.model('referral', ReferralSchema);

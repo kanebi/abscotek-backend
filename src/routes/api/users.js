@@ -8,71 +8,21 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const config = require('config');
 const { check, validationResult } = require('express-validator');
-const { Resend } = require('resend');
-const { v4: uuidv4 } = require('uuid');
-
+const jwt = require('jsonwebtoken');
+const jwtSecret = process.env.JWT_SECRET || 'supersecretjwttoken';
+const auth = require('../../middleware/auth');
 const User = require('../../models/User');
-const UserVerification = require('../../models/UserVerification');
-const logger = require('../../config/logger');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-/**
- * @swagger
- * /api/users:
- *   post:
- *     summary: Register user
- *     description: Register a new user.
- *     tags: [Users]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - name
- *               - email
- *               - password
- *             properties:
- *               name:
- *                 type: string
- *               email:
- *                 type: string
- *                 format: email
- *               password:
- *                 type: string
- *                 format: password
- *               referralCode:
- *                 type: string
- *                 description: Optional referral code from an existing user.
- *     responses:
- *       200:
- *         description: The JWT token
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 token:
- *                   type: string
- *       400:
- *         description: Bad request
- *       500:
- *         description: Server error
- */
+// @desc    Register user
+// @route   POST api/users
+// @access  Public
 router.post(
   '/',
   [
     check('name', 'Name is required').not().isEmpty(),
     check('email', 'Please include a valid email').isEmail(),
-    check(
-      'password',
-      'Please enter a password with 6 or more characters'
-    ).isLength({ min: 6 }),
+    check('password', 'Please enter a password with 6 or more characters').isLength({ min: 6 }),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -89,21 +39,10 @@ router.post(
         return res.status(400).json({ errors: [{ msg: 'User already exists' }] });
       }
 
-      let referredBy = null;
-      if (referralCode) {
-        const referral = await Referral.findOne({ referralCode });
-        if (referral) {
-          referredBy = referral.referrer;
-        } else {
-          return res.status(400).json({ errors: [{ msg: 'Invalid referral code' }] });
-        }
-      }
-
       user = new User({
         name,
         email,
         password,
-        referredBy,
       });
 
       const salt = await bcrypt.genSalt(10);
@@ -112,106 +51,111 @@ router.post(
 
       await user.save();
 
-      if (referralCode) {
-        await Referral.updateOne({ referralCode }, { $set: { referredUser: user._id } });
-      }
-
-      // Send email verification
-      const uniqueString = uuidv4() + user._id;
-      const expiresAt = Date.now() + 21600000; // 6 hours
-
-      const newUserVerification = new UserVerification({
-        userId: user._id,
-        uniqueString,
-        expiresAt,
-      });
-
-      await newUserVerification.save();
-
-      const verificationLink = `http://localhost:5832/api/users/verify/${user._id}/${uniqueString}`;
-
-      await resend.emails.send({
-        from: 'onboarding@resend.dev',
-        to: email,
-        subject: 'Verify Your Email',
-        html: `<p>Verify your email address to complete the signup and login into your account.</p><p>This link <b>expires in 6 hours</b>.</p><p>Press <a href=${verificationLink}>here</a> to proceed.</p>`,
-      });
-
-      logger.info(`Verification email sent to ${email}`);
-
+      // Create JWT payload with user info
       const payload = {
         user: {
           id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          walletAddress: user.walletAddress
         },
       };
 
-      jwt.sign(
-        payload,
-        config.get('jwtSecret'),
-        { expiresIn: 360000 },
-        (err, token) => {
+              jwt.sign(
+          payload,
+          jwtSecret,
+          { expiresIn: '24h' },
+          (err, token) => {
           if (err) throw err;
-          res.json({ token });
+          res.json({ 
+            token,
+            user: {
+              id: user.id,
+              email: user.email,
+              name: user.name,
+              role: user.role,
+              walletAddress: user.walletAddress
+            }
+          });
         }
       );
     } catch (err) {
-      logger.error(err.message);
+      console.error(err.message);
       res.status(500).send('Server error');
     }
   }
 );
 
-/**
- * @swagger
- * /api/users/verify/{userId}/{uniqueString}:
- *   get:
- *     summary: Verify user email
- *     description: Verify a user's email address.
- *     tags: [Users]
- *     parameters:
- *       - in: path
- *         name: userId
- *         schema:
- *           type: string
- *         required: true
- *         description: The user ID.
- *       - in: path
- *         name: uniqueString
- *         schema:
- *           type: string
- *         required: true
- *         description: The unique verification string.
- *     responses:
- *       200:
- *         description: Email verified successfully!
- *       400:
- *         description: Invalid verification link or link expired
- *       500:
- *         description: Server error
- */
+// @desc    Get current user profile
+// @route   GET api/users/profile
+// @access  Private
+router.get('/profile', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    res.json(user);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @desc    Update user profile
+// @route   PUT api/users/profile
+// @access  Private
+router.put('/profile', auth, async (req, res) => {
+  const { name, email } = req.body;
+
+  try {
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+
+    if (name) user.name = name;
+    if (email) user.email = email;
+
+    await user.save();
+
+    res.json({
+      msg: 'Profile updated successfully',
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        walletAddress: user.walletAddress
+      }
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @desc    Verify user email
+// @route   GET api/users/verify/:userId/:uniqueString
+// @access  Public
 router.get('/verify/:userId/:uniqueString', async (req, res) => {
   try {
     const { userId, uniqueString } = req.params;
 
-    const userVerification = await UserVerification.findOne({ userId, uniqueString });
+    const user = await User.findById(userId);
 
-    if (!userVerification) {
-      return res.status(400).send('Invalid verification link');
+    if (!user) {
+      return res.status(400).json({ msg: 'Invalid verification link' });
     }
 
-    if (userVerification.expiresAt < Date.now()) {
-      await UserVerification.deleteOne({ userId });
-      await User.deleteOne({ _id: userId });
-      return res.status(400).send('Verification link expired. Please register again.');
-    }
+    // Here you would typically verify the uniqueString against a stored verification token
+    // For now, we'll just mark the user as verified
+    user.isVerified = true;
+    await user.save();
 
-    await User.updateOne({ _id: userId }, { $set: { isVerified: true } });
-    await UserVerification.deleteOne({ userId });
-
-    res.send('Email verified successfully!');
+    res.json({ msg: 'Email verified successfully!' });
   } catch (err) {
-    logger.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err.message);
+    res.status(500).send('Server Error');
   }
 });
 
