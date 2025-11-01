@@ -76,12 +76,50 @@ const ProductSchema = new mongoose.Schema(
     stock: { type: Number, default: 0, min: 0 },
     outOfStock: { type: Boolean, default: true },
     published: { type: Boolean, default: true },
+    variants: [{
+      name: { type: String, required: true },
+      price: { type: Number, required: true, min: 0 },
+      currency: { type: String, enum: ['USDT'], default: 'USDT' },
+      stock: { type: Number, default: 0, min: 0 },
+      sku: { type: String, default: null },
+      attributes: [{
+        name: { type: String, required: true },
+        value: { type: String, required: true }
+      }],
+      images: {
+        type: [{
+          type: String,
+          validate: {
+            validator: function (v) {
+              return (
+                typeof v === 'string' &&
+                /^https?:\/\//i.test(v)
+              );
+            },
+            message: 'Image must be a valid URL',
+          },
+        }],
+        default: [],
+      },
+    }],
   },
   { timestamps: true }
 );
 
 // Text index for name to support search
 ProductSchema.index({ name: 'text' });
+
+// Virtual field for first image
+ProductSchema.virtual('firstImage').get(function() {
+  if (this.images && this.images.length > 0) {
+    return this.images[0];
+  }
+  return null;
+});
+
+// Ensure virtual fields are included when converting to JSON
+ProductSchema.set('toJSON', { virtuals: true });
+ProductSchema.set('toObject', { virtuals: true });
 
 // Derive slug before validation if missing
 ProductSchema.pre('validate', async function (next) {
@@ -103,7 +141,10 @@ ProductSchema.pre('validate', async function (next) {
       this.slug = candidate;
     }
 
-    // Derive outOfStock from stock
+    // Derive outOfStock from stock or variants
+    if (this.variants && this.variants.length > 0) {
+      this.stock = this.variants.reduce((total, variant) => total + (variant.stock || 0), 0);
+    }
     this.outOfStock = (this.stock ?? 0) <= 0;
     next();
   } catch (err) {

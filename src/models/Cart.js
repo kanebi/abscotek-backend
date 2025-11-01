@@ -1,30 +1,102 @@
 const mongoose = require('mongoose');
 
 const CartItemSchema = new mongoose.Schema({
-  product: {
+  productId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'product',
-    required: true,
+    ref: 'Product',
+    required: true
+  },
+  product: {
+    type: mongoose.Schema.Types.Mixed,
+    required: true
+  },
+  variant: {
+    variantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null
+    },
+    name: { type: String, default: null },
+    attributes: [{
+      name: { type: String },
+      value: { type: String }
+    }],
+    additionalPrice: { type: Number, default: 0 }
   },
   quantity: {
     type: Number,
     required: true,
-    default: 1,
+    min: 1
   },
+  unitPrice: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  currency: {
+    type: String,
+    enum: ['USDT', 'USD', 'NGN', 'EUR'],
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['active', 'ordered', 'removed'],
+    default: 'active'
+  }
 });
 
 const CartSchema = new mongoose.Schema({
   user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'user',
-    required: true,
-    unique: true,
+    required: true
   },
   items: [CartItemSchema],
-  date: {
-    type: Date,
-    default: Date.now,
+  currency: {
+    type: String,
+    enum: ['USDT', 'USD', 'NGN', 'EUR'],
+    default: 'USDT'
   },
+  subtotal: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  deliveryFee: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  discount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  total: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  selectedAddress: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'DeliveryAddress'
+  },
+  selectedDeliveryMethod: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'deliveryMethod'
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
 });
 
-module.exports = Cart = mongoose.model('cart', CartSchema);
+CartSchema.pre('save', function(next) {
+  this.updatedAt = new Date();
+  next();
+});
+
+module.exports = mongoose.model('Cart', CartSchema);

@@ -100,11 +100,40 @@ router.get('/profile', auth, async (req, res) => {
   }
 });
 
-// @desc    Update user profile
-// @route   PUT api/users/profile
+// @desc    Get user profile statistics
+// @route   GET api/users/profile/stats
 // @access  Private
-router.put('/profile', auth, async (req, res) => {
-  const { name, email } = req.body;
+router.get('/profile/stats', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('balance');
+    if (!user) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+
+    // Get order count from orders collection
+    const Order = require('../../models/Order');
+    const orderCount = await Order.countDocuments({ user: req.user.id });
+
+    // Get referral stats
+    const totalReferrals = await User.countDocuments({ referredBy: req.user.id });
+
+    res.json({
+      balance: user.balance || 0,
+      orderCount: orderCount || 0,
+      totalReferrals: totalReferrals || 0,
+      currency: user.preferences?.currency || 'USDT'
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @desc    Update user preferences
+// @route   PUT api/users/preferences
+// @access  Private
+router.put('/preferences', auth, async (req, res) => {
+  const { currency } = req.body;
 
   try {
     const user = await User.findById(req.user.id);
@@ -113,8 +142,74 @@ router.put('/profile', auth, async (req, res) => {
       return res.status(404).json({ msg: 'User not found' });
     }
 
+    // Initialize preferences if it doesn't exist
+    if (!user.preferences) {
+      user.preferences = {};
+    }
+
+    // Update currency preference
+    if (currency) {
+      const validCurrencies = ['USDT', 'USD', 'NGN', 'EUR'];
+      if (!validCurrencies.includes(currency)) {
+        return res.status(400).json({
+          msg: `Invalid currency. Valid options are: ${validCurrencies.join(', ')}`
+        });
+      }
+      user.preferences.currency = currency;
+    }
+
+    await user.save();
+
+    res.json({
+      msg: 'Preferences updated successfully',
+      preferences: user.preferences
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// @desc    Update user profile
+// @route   PUT api/users/profile
+// @access  Private
+router.put('/profile', auth, async (req, res) => {
+  const {
+    name,
+    firstName,
+    lastName,
+    email,
+    phoneNumber,
+    areaNumber,
+    walletAddress,
+    companyName,
+    preferences
+  } = req.body;
+
+  try {
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+
+    // Update basic fields
     if (name) user.name = name;
+    if (firstName) user.firstName = firstName;
+    if (lastName) user.lastName = lastName;
     if (email) user.email = email;
+    if (phoneNumber) user.phoneNumber = phoneNumber;
+    if (areaNumber) user.areaNumber = areaNumber;
+    if (walletAddress) user.walletAddress = walletAddress;
+    if (companyName) user.companyName = companyName;
+
+    // Update preferences
+    if (preferences) {
+      if (preferences.currency) {
+        user.preferences = user.preferences || {};
+        user.preferences.currency = preferences.currency;
+      }
+    }
 
     await user.save();
 
@@ -122,17 +217,30 @@ router.put('/profile', auth, async (req, res) => {
       msg: 'Profile updated successfully',
       user: {
         id: user.id,
-        email: user.email,
         name: user.name,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phoneNumber: user.phoneNumber,
+        areaNumber: user.areaNumber,
+        walletAddress: user.walletAddress,
+        companyName: user.companyName,
+        preferences: user.preferences,
         role: user.role,
-        walletAddress: user.walletAddress
+        balance: user.balance,
+        referralCode: user.referralCode
       }
     });
   } catch (err) {
     console.error(err.message);
+    if (err.code === 11000) {
+      return res.status(400).json({ msg: 'Email or wallet address already exists' });
+    }
     res.status(500).send('Server Error');
   }
 });
+
+// Address endpoints have been moved to /api/delivery-addresses
 
 // @desc    Verify user email
 // @route   GET api/users/verify/:userId/:uniqueString

@@ -15,6 +15,20 @@ const options = {
     ],
     components: {
       schemas: {
+        Address: {
+          type: 'object',
+          properties: {
+            label: { type: 'string' },
+            fullName: { type: 'string' },
+            phone: { type: 'string' },
+            street: { type: 'string' },
+            city: { type: 'string' },
+            state: { type: 'string' },
+            country: { type: 'string' },
+            postalCode: { type: 'string' },
+            isDefault: { type: 'boolean' },
+          },
+        },
         Product: {
           type: 'object',
           properties: {
@@ -31,9 +45,24 @@ const options = {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            product: { type: 'string' },
+            products: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  product: { type: 'string' },
+                  quantity: { type: 'number' },
+                },
+              },
+            },
             buyer: { type: 'string' },
+            shippingAddress: { $ref: '#/components/schemas/Address' },
+            deliveryMethod: { $ref: '#/components/schemas/DeliveryMethod' },
+            deliveryFee: { type: 'number' },
+            subTotal: { type: 'number' },
+            totalAmount: { type: 'number' },
             orderStatus: { type: 'string', enum: ['Created', 'Paid', 'Shipped', 'Delivered', 'Cancelled'] },
+            trackingNumber: { type: 'string' },
             contractAddress: { type: 'string' },
             date: { type: 'string', format: 'date-time' },
           },

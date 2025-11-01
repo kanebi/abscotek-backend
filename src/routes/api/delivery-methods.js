@@ -8,6 +8,7 @@ const {
   getDeliveryMethodById,
   updateDeliveryMethod,
   deleteDeliveryMethod,
+  syncDeliveryMethods,
 } = require('../../controllers/deliveryMethodController');
 
 /**
@@ -84,6 +85,62 @@ router.post(
  *         description: Server error
  */
 router.get('/', getDeliveryMethods);
+
+/**
+ * @swagger
+ * /api/delivery-methods/sync:
+ *   post:
+ *     summary: Sync frontend delivery methods with backend
+ *     description: Get or create delivery methods based on frontend configuration.
+ *     tags: [Delivery Methods]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - frontendMethods
+ *             properties:
+ *               frontendMethods:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     name:
+ *                       type: string
+ *                     price:
+ *                       type: number
+ *                     currency:
+ *                       type: string
+ *     responses:
+ *       200:
+ *         description: Synced delivery methods with backend IDs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   _id:
+ *                     type: string
+ *                   id:
+ *                     type: string
+ *                   name:
+ *                     type: string
+ *                   price:
+ *                     type: number
+ *                   currency:
+ *                     type: string
+ *       400:
+ *         description: Bad request
+ *       500:
+ *         description: Server error
+ */
+router.post('/sync', syncDeliveryMethods);
 
 /**
  * @swagger

@@ -12,6 +12,19 @@ const app = express();
 
 // Connect Database
 connectDB();
+
+// Load all models to ensure they're registered
+require('./src/models/User');
+require('./src/models/Product');
+require('./src/models/Cart');
+require('./src/models/Order');
+require('./src/models/Payment');
+require('./src/models/DeliveryAddress');
+require('./src/models/DeliveryMethod');
+require('./src/models/Wishlist');
+require('./src/models/Referral');
+require('./src/models/UserVerification');
+
 // Ensure DB indexes are correct (partial unique, text, etc.)
 const { ensureIndexes } = require('./src/config/ensureIndexes');
 ensureIndexes().catch(() => {});
@@ -46,6 +59,7 @@ app.get('/', (req, res) => {
 app.use('/api/users', require('./src/routes/api/users'));
 app.use('/api/auth', require('./src/routes/api/auth'));
 app.use('/api/admin', require('./src/routes/api/adminAuth'));
+app.use('/api/admin', require('./src/routes/api/adminOrders'));
 app.use('/api/web3', require('./src/routes/api/web3Auth'));
 app.use('/api/products', require('./src/routes/api/products'));
 app.use('/api/admin/products', require('./src/routes/api/adminProducts'));
@@ -53,6 +67,7 @@ app.use('/api/orders', require('./src/routes/api/orders'));
 app.use('/api/cart', require('./src/routes/api/cart'));
 app.use('/api/wishlist', require('./src/routes/api/wishlist'));
 app.use('/api/delivery-methods', require('./src/routes/api/delivery-methods'));
+app.use('/api/delivery-addresses', require('./src/routes/api/delivery-addresses'));
 app.use('/api/referrals', require('./src/routes/api/referrals'));
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 

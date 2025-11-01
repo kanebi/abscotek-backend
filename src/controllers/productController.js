@@ -72,6 +72,7 @@ const createProduct = async (req, res) => {
       brand,
       sku,
       specs,
+      variants,
       stock,
       published,
       slug,
@@ -94,13 +95,60 @@ const createProduct = async (req, res) => {
 const getProducts = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req.query);
-    const { search, category, minPrice, maxPrice, sort } = req.query;
+    const { search, category, minPrice, maxPrice, sort, color, size, brand } = req.query;
 
     const filter = { published: true };
-    if (category) filter.category = category;
-    if (minPrice) filter.price = { ...(filter.price || {}), $gte: Number(minPrice) };
-    if (maxPrice) filter.price = { ...(filter.price || {}), $lte: Number(maxPrice) };
+
+    // Category filter - support multiple categories
+    if (category) {
+      const categories = Array.isArray(category) ? category : category.split(',');
+      filter.category = { $in: categories };
+    }
+
+    // Brand filter - support multiple brands
+    if (brand) {
+      const brands = Array.isArray(brand) ? brand : brand.split(',');
+      filter.brand = { $in: brands };
+    }
+
+    // Price range filter
+    if (minPrice || maxPrice) {
+      filter.price = {};
+      if (minPrice) filter.price.$gte = Number(minPrice);
+      if (maxPrice) filter.price.$lte = Number(maxPrice);
+    }
+
+    // Text search
     if (search) filter.$text = { $search: search };
+
+    // Advanced filtering using specs and variants
+    const specFilters = [];
+    const variantFilters = [];
+
+    // Color filter - check both specs and variants
+    if (color) {
+      const colors = Array.isArray(color) ? color : color.split(',');
+      specFilters.push({ specs: { $elemMatch: { label: 'Color', value: { $in: colors } } } });
+      variantFilters.push({ variants: { $elemMatch: { attributes: { $elemMatch: { name: 'Color', value: { $in: colors } } } } } });
+    }
+
+    // Size filter - check both specs and variants
+    if (size) {
+      const sizes = Array.isArray(size) ? size : size.split(',');
+      specFilters.push({ specs: { $elemMatch: { label: 'Size', value: { $in: sizes } } } });
+      variantFilters.push({ variants: { $elemMatch: { attributes: { $elemMatch: { name: 'Size', value: { $in: sizes } } } } } });
+    }
+
+    // Combine filters - products must match at least one of the spec filters OR one of the variant filters
+    if (specFilters.length > 0 || variantFilters.length > 0) {
+      const orConditions = [];
+      if (specFilters.length > 0) orConditions.push(...specFilters);
+      if (variantFilters.length > 0) orConditions.push(...variantFilters);
+
+      if (orConditions.length > 0) {
+        filter.$or = orConditions;
+      }
+    }
 
     const query = Product.find(filter).sort(parseSort(sort));
 
@@ -124,13 +172,60 @@ const getProducts = async (req, res) => {
 const getProductsAdmin = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req.query);
-    const { search, category, minPrice, maxPrice, sort } = req.query;
+    const { search, category, minPrice, maxPrice, sort, color, size, brand } = req.query;
 
     const filter = {};
-    if (category) filter.category = category;
-    if (minPrice) filter.price = { ...(filter.price || {}), $gte: Number(minPrice) };
-    if (maxPrice) filter.price = { ...(filter.price || {}), $lte: Number(maxPrice) };
+
+    // Category filter - support multiple categories
+    if (category) {
+      const categories = Array.isArray(category) ? category : category.split(',');
+      filter.category = { $in: categories };
+    }
+
+    // Brand filter - support multiple brands
+    if (brand) {
+      const brands = Array.isArray(brand) ? brand : brand.split(',');
+      filter.brand = { $in: brands };
+    }
+
+    // Price range filter
+    if (minPrice || maxPrice) {
+      filter.price = {};
+      if (minPrice) filter.price.$gte = Number(minPrice);
+      if (maxPrice) filter.price.$lte = Number(maxPrice);
+    }
+
+    // Text search
     if (search) filter.$text = { $search: search };
+
+    // Advanced filtering using specs and variants
+    const specFilters = [];
+    const variantFilters = [];
+
+    // Color filter - check both specs and variants
+    if (color) {
+      const colors = Array.isArray(color) ? color : color.split(',');
+      specFilters.push({ specs: { $elemMatch: { label: 'Color', value: { $in: colors } } } });
+      variantFilters.push({ variants: { $elemMatch: { attributes: { $elemMatch: { name: 'Color', value: { $in: colors } } } } } });
+    }
+
+    // Size filter - check both specs and variants
+    if (size) {
+      const sizes = Array.isArray(size) ? size : size.split(',');
+      specFilters.push({ specs: { $elemMatch: { label: 'Size', value: { $in: sizes } } } });
+      variantFilters.push({ variants: { $elemMatch: { attributes: { $elemMatch: { name: 'Size', value: { $in: sizes } } } } } });
+    }
+
+    // Combine filters - products must match at least one of the spec filters OR one of the variant filters
+    if (specFilters.length > 0 || variantFilters.length > 0) {
+      const orConditions = [];
+      if (specFilters.length > 0) orConditions.push(...specFilters);
+      if (variantFilters.length > 0) orConditions.push(...variantFilters);
+
+      if (orConditions.length > 0) {
+        filter.$or = orConditions;
+      }
+    }
 
     const [items, total] = await Promise.all([
       Product.find(filter)
@@ -154,13 +249,30 @@ const getProductsAdmin = async (req, res) => {
 const getUnpublishedProductsAdmin = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req.query);
-    const { search, category, minPrice, maxPrice, sort } = req.query;
+    const { search, category, minPrice, maxPrice, sort, color, size } = req.query;
 
     const filter = { published: false };
     if (category) filter.category = category;
     if (minPrice) filter.price = { ...(filter.price || {}), $gte: Number(minPrice) };
     if (maxPrice) filter.price = { ...(filter.price || {}), $lte: Number(maxPrice) };
     if (search) filter.$text = { $search: search };
+
+    // Handle color and size filters using specs
+    if (color) {
+      filter.specs = { $elemMatch: { label: 'Color', value: color } };
+    }
+    if (size) {
+      if (filter.specs) {
+        // If color filter exists, combine with $and
+        filter.$and = [
+          { specs: { $elemMatch: { label: 'Color', value: color } } },
+          { specs: { $elemMatch: { label: 'Size', value: size } } }
+        ];
+        delete filter.specs;
+      } else {
+        filter.specs = { $elemMatch: { label: 'Size', value: size } };
+      }
+    }
 
     const [items, total] = await Promise.all([
       Product.find(filter)

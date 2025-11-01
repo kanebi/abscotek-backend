@@ -6,6 +6,13 @@ const DeliveryMethodSchema = new mongoose.Schema({
     required: true,
     unique: true,
   },
+  code: {
+    type: String,
+    required: true,
+    unique: true,
+    uppercase: true,
+    trim: true
+  },
   description: {
     type: String,
   },
@@ -13,8 +20,18 @@ const DeliveryMethodSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  currency: {
+    type: String,
+    required: true,
+    default: 'NGN',
+    enum: ['USDT', 'USD', 'NGN', 'EUR']
+  },
   estimatedDeliveryTime: {
     type: String,
+  },
+  isActive: {
+    type: Boolean,
+    default: true
   },
   date: {
     type: Date,

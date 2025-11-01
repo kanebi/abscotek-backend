@@ -1,19 +1,26 @@
-const Order = require('../models/Order');
+const mongoose = require('mongoose');
+const { Order, OrderItem } = require('../models/Order');
+const Payment = require('../models/Payment');
 const Product = require('../models/Product');
+const Cart = require('../models/Cart');
+const DeliveryMethod = require('../models/DeliveryMethod');
 const { awardReferralBonus } = require('./referralController');
+const User = require('../models/User');
+const PaystackService = require('../services/paystackService');
+const Paystack = require('paystack-api')(process.env.PAYSTACK_SECRET_KEY);
 
-// @desc    Create an order
+// @desc    Create an order (direct)
 // @route   POST /api/orders
 // @access  Private
 const createOrder = async (req, res) => {
   try {
-    const { products } = req.body; // products should be an array of { productId, quantity }
+    const { products, deliveryMethodId, shippingAddress } = req.body; // products should be an array of { productId, quantity }
 
     if (!products || products.length === 0) {
       return res.status(400).json({ msg: 'No products in order' });
     }
 
-    let totalAmountUSD = 0;
+    let subTotalUSD = 0;
     const orderItems = [];
     const productIds = products.map(p => p.productId);
     const foundProducts = await Product.find({ _id: { $in: productIds } });
@@ -25,24 +32,63 @@ const createOrder = async (req, res) => {
     for (const item of products) {
       const product = foundProducts.find(p => p._id.toString() === item.productId);
       if (product) {
-        const pricePerUnitUSD = product.price; 
-        totalAmountUSD += pricePerUnitUSD * item.quantity;
+        // Convert item price to order currency if different
+        let itemPrice = product.price;
+        if (product.currency && product.currency !== 'USDT') {
+          // For now, assume USDT/USD are 1:1, and NGN conversion
+          if (product.currency === 'NGN') {
+            itemPrice = product.price / 1500; // Convert NGN to USDT
+          }
+          // Add more conversion logic as needed for other currencies
+        }
+        subTotalUSD += itemPrice * item.quantity;
         orderItems.push({
           productId: item.productId,
           quantity: item.quantity,
-          pricePerUnit: pricePerUnitUSD,
+          pricePerUnit: itemPrice,
         });
+      }
+    }
+
+    let deliveryFee = 0;
+    let deliveryMethod = null;
+    if (deliveryMethodId) {
+      deliveryMethod = await DeliveryMethod.findById(deliveryMethodId);
+      if (!deliveryMethod) {
+        return res.status(400).json({ msg: 'Invalid delivery method' });
+      }
+      deliveryFee = deliveryMethod.price || 0;
+    }
+
+    const totalAmountUSD = subTotalUSD + deliveryFee;
+
+    // Validate shipping address exists if provided
+    if (shippingAddressId) {
+      const DeliveryAddress = require('../models/DeliveryAddress');
+      const shippingAddress = await DeliveryAddress.findById(shippingAddressId);
+      if (!shippingAddress) {
+        return res.status(400).json({ msg: 'Invalid shipping address' });
       }
     }
 
     // Create MongoDB order
     const newOrder = new Order({
-      buyer: req.user.id,
-      products: products.map(p => ({ product: p.productId, quantity: p.quantity })),
+      buyer: req.user.id, // Use 'buyer' as per schema
+      products: products.map(p => ({ 
+        product: p.product._id, 
+        quantity: p.quantity,
+        price: p.product?.price || 0
+      })),
+      subTotal: subTotalUSD, // Use 'subTotal' as per schema
+      deliveryMethod: deliveryMethod ? deliveryMethod._id : undefined,
+      deliveryFee,
       totalAmount: totalAmountUSD,
-      orderStatus: 'Created',
+      status: 'pending', // Changed from 'orderStatus' to 'status'
+      currency: 'USDT', // Add currency field
       // Add contract address if user has wallet
       contractAddress: req.user.walletAddress ? `0x${req.user.walletAddress.slice(2)}` : null,
+      // Add shipping address ID if provided
+      ...(shippingAddressId && { shippingAddress: shippingAddressId })
     });
 
     const savedOrder = await newOrder.save();
@@ -54,11 +100,21 @@ const createOrder = async (req, res) => {
 
     // Populate product details for response
     const populatedOrder = await Order.findById(savedOrder._id)
-      .populate('products.product', ['name', 'price', 'image'])
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
       .populate('buyer', ['name', 'email', 'walletAddress']);
 
+    const orderObj = populatedOrder.toObject();
+    // Ensure _id is a string
+    orderObj._id = orderObj._id.toString();
+
     res.json({
-      ...populatedOrder.toObject(),
+      ...orderObj,
       message: 'Order created successfully'
     });
   } catch (err) {
@@ -67,20 +123,511 @@ const createOrder = async (req, res) => {
   }
 };
 
+// @desc    Checkout from cart to order
+// @route   POST /api/orders/checkout
+// @access  Private
+const checkoutFromCart = async (req, res) => {
+  try {
+    const { 
+      deliveryMethodId, 
+      shippingAddressId, 
+      paymentMethod = 'wallet',
+      walletAddress,
+      currency = 'USDT',
+      notes = ''
+    } = req.body;
+
+    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price']);
+    if (!cart || cart.items.length === 0) {
+      return res.status(400).json({ msg: 'Cart is empty' });
+    }
+
+    // Filter out ordered items - only process active items
+    const activeItems = cart.items.filter(item => item.status !== 'ordered');
+    if (activeItems.length === 0) {
+      return res.status(400).json({ msg: 'No active items in cart' });
+    }
+
+    const products = activeItems.map((item) => ({ productId: item.product._id.toString(), quantity: item.quantity }));
+
+    // Calculate total amount - convert all prices to order currency before summing
+    let subTotalUSD = 0;
+    for (const item of activeItems) {
+      // Convert item price to order currency if different
+      let itemPrice = item.product.price;
+      if (item.product.currency && item.product.currency !== currency) {
+        // For now, assume USDT/USD are 1:1, and NGN conversion
+        if (item.product.currency === 'NGN' && currency === 'USDT') {
+          itemPrice = item.product.price / 1500; // Convert NGN to USDT
+        } else if (item.product.currency === 'USDT' && currency === 'NGN') {
+          itemPrice = item.product.price * 1500; // Convert USDT to NGN
+        }
+        // Add more conversion logic as needed for other currencies
+      }
+      subTotalUSD += itemPrice * item.quantity;
+    }
+
+    // Get delivery method
+    const deliveryMethod = await DeliveryMethod.findById(deliveryMethodId);
+    if (!deliveryMethod) {
+      return res.status(400).json({ msg: 'Invalid delivery method' });
+    }
+
+    const totalAmount = subTotalUSD + deliveryMethod.price;
+
+    // Handle different payment methods
+    if (paymentMethod === 'paystack') {
+      // For Paystack payments, create order with pending status
+      const orderData = {
+        buyer: req.user.id,
+        products: cart.items.map(item => ({
+          product: item.product._id,
+          quantity: item.quantity,
+          price: item.product.price
+        })),
+        subTotal: subTotalUSD, // Use 'subTotal' as per schema
+        deliveryMethod: deliveryMethodId,
+        deliveryFee: deliveryMethod.price, // Use 'deliveryFee' as per schema
+        totalAmount,
+        status: 'pending_payment',
+        paymentMethod: 'paystack',
+        currency,
+        notes,
+        shippingAddressId
+      };
+
+      const order = new Order(orderData);
+      await order.save();
+
+      // Initialize Paystack transaction
+      const paystackReference = PaystackService.generateReference();
+      const paystackAmount = PaystackService.convertToKobo(totalAmount, 'NGN'); // Convert to NGN for Paystack
+
+      const paystackResponse = await PaystackService.initializeTransaction({
+        email: req.user.email,
+        amount: paystackAmount,
+        reference: paystackReference,
+        currency: 'NGN',
+        metadata: {
+          orderId: order._id.toString(),
+          userId: req.user.id,
+          originalCurrency: currency,
+          originalAmount: totalAmount
+        }
+      });
+
+      // Update order with Paystack reference and mark as pending payment
+      order.paystackReference = paystackReference;
+      order.status = 'pending_payment';
+      order.paymentStatus = 'pending';
+      await order.save();
+
+      // Ensure order _id is a string
+      const orderObj = order.toObject();
+      orderObj._id = orderObj._id.toString();
+      
+      return res.json({
+        order: orderObj,
+        paystackData: {
+          authorization_url: paystackResponse.data.authorization_url,
+          access_code: paystackResponse.data.access_code,
+          reference: paystackReference
+        },
+        orderId: orderObj._id // Explicitly include orderId for frontend
+      });
+    } else if (paymentMethod === 'paystack') {
+      // For Paystack payments, verify payment first, then create/update order
+      const { paystackReference } = req.body;
+
+      if (!paystackReference) {
+        return res.status(400).json({ msg: 'Paystack reference is required' });
+      }
+
+      try {
+        // Verify payment with Paystack SDK
+        const verification = await Paystack.transaction.verify({ reference: paystackReference });
+
+        if (!verification.status || verification.data.status !== 'success') {
+          return res.status(400).json({ msg: 'Payment verification failed' });
+        }
+
+        // Check if order already exists for this reference
+        let existingOrder = await Order.findOne({ paystackReference });
+
+        if (existingOrder) {
+          // Update existing order status
+          existingOrder.status = 'paid';
+          existingOrder.paymentStatus = 'paid';
+          existingOrder.paymentReference = paystackReference;
+          await existingOrder.save();
+
+          // Mark cart items as ordered
+          const cart = await Cart.findOne({ user: existingOrder.buyer });
+          if (cart) {
+            cart.items = cart.items.map(item => ({
+              ...item.toObject(),
+              status: 'ordered'
+            }));
+            await cart.save();
+          }
+
+          // Award referral bonus
+          if (existingOrder.buyer.referredBy) {
+            await awardReferralBonus(existingOrder.buyer, existingOrder.totalAmount);
+          }
+
+          const populatedOrder = await Order.findById(existingOrder._id)
+            .populate({
+              path: 'items',
+              populate: {
+                path: 'product',
+                select: 'name price images'
+              }
+            })
+            .populate('buyer', ['name', 'email', 'walletAddress']);
+
+          const orderObj = populatedOrder.toObject();
+          orderObj._id = orderObj._id.toString();
+
+          return res.json({
+            ...orderObj,
+            orderId: orderObj._id,
+            message: 'Order payment confirmed successfully'
+          });
+        } else {
+          // Create new order with verified payment
+          const orderData = {
+            buyer: req.user.id,
+            products: cart.items.map(item => ({
+              product: item.product._id,
+              quantity: item.quantity,
+              price: item.product.price
+            })),
+            subTotal: subTotalUSD,
+            deliveryMethod: deliveryMethodId,
+            deliveryFee: deliveryMethod.price,
+            totalAmount,
+            status: 'paid',
+            paymentMethod: 'paystack',
+            paymentStatus: 'paid',
+            paystackReference,
+            paymentReference: paystackReference,
+            currency,
+            notes,
+            shippingAddressId
+          };
+
+          const order = new Order(orderData);
+          const savedOrder = await order.save();
+
+          // Mark cart items as ordered
+          cart.items = cart.items.map(item => ({
+            ...item.toObject(),
+            status: 'ordered'
+          }));
+    await cart.save();
+
+          // Award referral bonus
+          if (req.user.referredBy) {
+            await awardReferralBonus(req.user.id, totalAmount);
+          }
+
+          const populatedOrder = await Order.findById(savedOrder._id)
+            .populate({
+              path: 'items',
+              populate: {
+                path: 'product',
+                select: 'name price images'
+              }
+            })
+            .populate('buyer', ['name', 'email', 'walletAddress']);
+
+          const orderObj = populatedOrder.toObject();
+          orderObj._id = orderObj._id.toString();
+
+          return res.json({
+            ...orderObj,
+            orderId: orderObj._id,
+            message: 'Order created and payment confirmed successfully'
+          });
+        }
+      } catch (error) {
+        console.error('Paystack verification error:', error);
+        return res.status(500).json({ msg: 'Payment verification failed', error: error.message });
+      }
+    } else {
+      // For wallet payments, create order directly
+      const orderData = {
+        buyer: req.user.id,
+        products: cart.items.map(item => ({
+          product: item.product._id,
+          quantity: item.quantity,
+          price: item.product.price
+        })),
+        subTotal: subTotalUSD,
+        deliveryMethod: deliveryMethodId,
+        deliveryFee: deliveryMethod.price,
+        totalAmount,
+        status: 'paid', // Wallet payments are immediately paid
+        paymentMethod: 'wallet',
+        paymentStatus: 'paid',
+        currency,
+        notes,
+        shippingAddressId,
+        walletAddress
+      };
+
+      const order = new Order(orderData);
+      const savedOrder = await order.save();
+
+      // Populate product details for response
+      const populatedOrder = await Order.findById(savedOrder._id)
+        .populate({
+          path: 'items',
+          populate: {
+            path: 'product',
+            select: 'name price images'
+          }
+        })
+        .populate('buyer', ['name', 'email', 'walletAddress']);
+
+      // Mark cart items as ordered instead of clearing them
+      console.log('Marking cart items as ordered for user:', req.user.id, 'Cart items before update:', cart.items.length);
+      cart.items = cart.items.map(item => ({
+        ...item.toObject(),
+        status: 'ordered'
+      }));
+      await cart.save();
+      console.log('Cart items marked as ordered for user:', req.user.id);
+
+      // Award referral bonus if applicable
+      if (req.user.referredBy) {
+        await awardReferralBonus(req.user.id, totalAmount);
+      }
+
+      const orderObj = populatedOrder.toObject();
+      // Ensure _id is a string
+      orderObj._id = orderObj._id.toString();
+
+      return res.json({
+        ...orderObj,
+        orderId: orderObj._id, // Explicitly include orderId for frontend
+        message: 'Order created successfully'
+      });
+    }
+  } catch (err) {
+    console.error('Checkout error:', err.message);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
+  }
+};
+
+// @desc    Handle Paystack webhook for payment verification
+// @route   POST /api/orders/paystack/webhook
+// @access  Public (webhook)
+const handlePaystackWebhook = async (req, res) => {
+  try {
+    const { event, data } = req.body;
+
+    if (event === 'charge.success') {
+      const { reference } = data;
+      
+      // Verify the transaction with Paystack
+      const verificationResponse = await PaystackService.verifyTransaction(reference);
+      
+      if (verificationResponse.data.status === 'success') {
+        // Find the order by Paystack reference
+        const order = await Order.findOne({ paystackReference: reference });
+        
+        if (order && order.status === 'pending_payment') {
+          // Update order status to paid
+          order.status = 'paid';
+          order.paymentStatus = 'paid';
+          order.paymentReference = reference;
+          await order.save();
+
+          console.log(`Order ${order._id} payment confirmed via Paystack webhook`);
+
+          // Mark cart items as ordered instead of clearing them
+          const cart = await Cart.findOne({ user: order.buyer });
+          if (cart) {
+            console.log('Marking cart items as ordered for user:', order.buyer, 'Cart items before update:', cart.items.length);
+            cart.items = cart.items.map(item => ({
+              ...item.toObject(),
+              status: 'ordered'
+            }));
+            await cart.save();
+            console.log('Cart items marked as ordered for user:', order.buyer);
+          } else {
+            console.log('No cart found for user:', order.buyer);
+          }
+
+          // Award referral bonus if applicable
+          try {
+            await awardReferralBonus(order.buyer, order.totalAmount);
+          } catch (referralError) {
+            console.error('Referral bonus error:', referralError);
+            // Don't fail the order for referral errors
+          }
+        }
+      }
+    }
+
+    res.status(200).json({ status: 'success' });
+  } catch (error) {
+    console.error('Paystack webhook error:', error);
+    res.status(400).json({ status: 'error', message: error.message });
+  }
+};
+
 // @desc    Get all orders for a user
 // @route   GET /api/orders
 // @access  Private
 const getOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ buyer: req.user.id })
-      .populate('products.product', ['name', 'price', 'image'])
-      .populate('buyer', ['name', 'email', 'walletAddress'])
-      .sort({ date: -1 });
+    console.log('Fetching orders for user:', req.user.id);
 
-    res.json(orders);
+    // Get category filter from query params
+    const { category = 'all' } = req.query;
+
+    // Build filter query based on category
+    let statusFilter = {};
+    if (category && category !== 'all') {
+      switch (category) {
+        case 'to-be-received':
+          statusFilter = { status: { $in: ['pending', 'confirmed', 'processing', 'shipped'] } };
+          break;
+        case 'completed':
+          statusFilter = { status: 'delivered' };
+          break;
+        case 'cancelled':
+          statusFilter = { status: { $in: ['cancelled', 'refunded'] } };
+          break;
+        default:
+          // For specific status values, filter by exact match
+          statusFilter = { status: category };
+      }
+    }
+
+    const filter = {
+      buyer: req.user.id,
+      ...statusFilter
+    };
+
+    // Find orders using the new schema structure
+    const orders = await Order.find(filter)
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('shippingAddress')
+      .populate('deliveryMethod')
+      .populate('payments')
+      .sort({ orderDate: -1 });
+
+    // Debug logging to see the actual data structure
+    if (orders.length > 0) {
+      console.log('getOrders - First order structure:', JSON.stringify(orders[0], null, 2));
+    }
+
+    // Ensure all order IDs are strings and manually populate product data if needed
+    const ordersWithStringIds = await Promise.all(orders.map(async (order) => {
+      const orderObj = order.toObject();
+      orderObj._id = orderObj._id.toString();
+
+      // Flatten shipping address data for frontend compatibility
+      if (orderObj.shippingAddress) {
+        orderObj.shipping = {
+          name: `${orderObj.shippingAddress.firstName} ${orderObj.shippingAddress.lastName}`,
+          email: orderObj.shippingAddress.email,
+          phone: `${orderObj.shippingAddress.areaNumber}${orderObj.shippingAddress.phoneNumber}`,
+          address: orderObj.shippingAddress.streetAddress
+        };
+      }
+
+      // Flatten delivery method data for frontend compatibility
+      if (orderObj.deliveryMethod) {
+        orderObj.delivery = {
+          method: orderObj.deliveryMethod.name,
+          timeframe: orderObj.deliveryMethod.estimatedDeliveryTime
+        };
+      }
+
+      // Flatten pricing data for frontend compatibility
+      orderObj.pricing = {
+        subtotal: orderObj.subTotal,
+        delivery: orderObj.deliveryFee,
+        total: orderObj.calculatedTotal || orderObj.totalAmount
+      };
+
+      // Flatten product data for frontend compatibility
+      if (orderObj.items && orderObj.items.length > 0) {
+        const firstItem = orderObj.items[0];
+        orderObj.product = {
+          name: firstItem.productName || firstItem.product?.name || 'Product',
+          variant: firstItem.variant?.name || '',
+          quantity: firstItem.quantity,
+          price: firstItem.unitPrice,
+          images: firstItem.product?.images || []
+        };
+      }
+
+      // Check if product data is incomplete and manually populate if needed
+      if (orderObj.items && orderObj.items.length > 0) {
+        for (let item of orderObj.items) {
+          if (item.product && (!item.product.images || item.product.images.length === 0 || !item.product.hasOwnProperty('images'))) {
+            try {
+              // Manually fetch the product with full data
+              const Product = require('../models/Product');
+              const fullProduct = await Product.findById(item.product._id).lean();
+              console.log('Manual population - fetched product:', {
+                id: fullProduct?._id,
+                name: fullProduct?.name,
+                hasImages: !!fullProduct?.images,
+                imagesLength: fullProduct?.images?.length || 0,
+                images: fullProduct?.images
+              });
+              if (fullProduct) {
+                item.product = {
+                  ...item.product,
+                  images: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images : ['/images/desktop-1.png'],
+                  variants: fullProduct.variants || [],
+                  firstImage: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images[0] : '/images/desktop-1.png'
+                };
+                console.log('Manually populated product:', item.product._id, 'with images:', item.product.images?.length || 0);
+              }
+            } catch (error) {
+              console.error('Error manually populating product:', error);
+            }
+          }
+        }
+      }
+
+      return orderObj;
+    }));
+
+    // Final fallback - ensure all products have images
+    ordersWithStringIds.forEach(order => {
+      if (order.items && order.items.length > 0) {
+        order.items.forEach(item => {
+          if (item.product && (!item.product.images || item.product.images.length === 0)) {
+            item.product.images = ['/images/desktop-1.png'];
+            item.product.firstImage = '/images/desktop-1.png';
+            console.log('Final fallback - added placeholder image for product:', item.product._id);
+          }
+        });
+      }
+    });
+
+    console.log(`Found ${ordersWithStringIds.length} orders for user`);
+    res.json(ordersWithStringIds);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    console.error('Error fetching orders:', err.message);
+    console.error('Error stack:', err.stack);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
   }
 };
 
@@ -89,27 +636,250 @@ const getOrders = async (req, res) => {
 // @access  Private
 const getOrderById = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id)
-      .populate('products.product', ['name', 'price', 'image'])
-      .populate('buyer', ['name', 'email', 'walletAddress']);
+    console.log('Fetching order by ID:', req.params.id);
+    
+    // First try to find the order without population to see its structure
+    const rawOrder = await Order.findById(req.params.id);
+    if (!rawOrder) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    console.log('Raw order structure:', {
+      hasUser: !!rawOrder.user,
+      hasBuyer: !!rawOrder.buyer,
+      hasItems: !!rawOrder.items,
+      hasProducts: !!rawOrder.products,
+      itemsLength: rawOrder.items ? rawOrder.items.length : 0,
+      productsLength: rawOrder.products ? rawOrder.products.length : 0,
+      orderKeys: Object.keys(rawOrder.toObject())
+    });
+
+    // Try to populate based on the order structure
+    let order;
+
+    // Populate using the new schema structure
+    order = await Order.findById(req.params.id)
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('shippingAddress')
+      .populate('deliveryMethod')
+      .populate('payments');
 
     if (!order) {
       return res.status(404).json({ msg: 'Order not found' });
     }
 
-    // Check if user owns this order or is admin
-    if (order.buyer._id.toString() !== req.user.id && req.user.role !== 'admin') {
+    // Check ownership
+    const orderOwnerId = order.buyer?._id || order.buyer;
+    if (!orderOwnerId) {
+      console.error('No buyer found in order:', order._id);
+      return res.status(500).json({ msg: 'Invalid order structure' });
+    }
+
+    // Convert to string for comparison
+    const ownerIdString = orderOwnerId.toString();
+    if (ownerIdString !== req.user.id && req.user.role !== 'admin') {
       return res.status(403).json({ msg: 'Access denied' });
     }
 
-    res.json(order);
+    // Ensure _id is a string for consistency
+    const orderObj = order.toObject();
+    orderObj._id = orderObj._id.toString();
+
+    // Flatten shipping address data for frontend compatibility
+    if (orderObj.shippingAddress) {
+      orderObj.shipping = {
+        name: `${orderObj.shippingAddress.firstName} ${orderObj.shippingAddress.lastName}`,
+        email: orderObj.shippingAddress.email,
+        phone: `${orderObj.shippingAddress.areaNumber}${orderObj.shippingAddress.phoneNumber}`,
+        address: orderObj.shippingAddress.streetAddress
+      };
+    }
+
+    // Flatten delivery method data for frontend compatibility
+    if (orderObj.deliveryMethod) {
+      orderObj.delivery = {
+        method: orderObj.deliveryMethod.name,
+        timeframe: orderObj.deliveryMethod.estimatedDeliveryTime
+      };
+    }
+
+    // Flatten pricing data for frontend compatibility
+    orderObj.pricing = {
+      subtotal: orderObj.subTotal,
+      delivery: orderObj.deliveryFee,
+      total: orderObj.calculatedTotal || orderObj.totalAmount
+    };
+
+    // Flatten product data for frontend compatibility
+    if (orderObj.items && orderObj.items.length > 0) {
+      const firstItem = orderObj.items[0];
+      orderObj.product = {
+        name: firstItem.productName || firstItem.product?.name || 'Product',
+        variant: firstItem.variant?.name || '',
+        quantity: firstItem.quantity,
+        price: firstItem.unitPrice,
+        images: firstItem.product?.images || []
+      };
+    }
+
+    // Add order stages mapping
+    const orderStages = [
+      { id: 1, name: "Submit Order", rank: 1 },
+      { id: 2, name: "Waiting for Delivery", rank: 2 },
+      { id: 3, name: "Out for delivery", rank: 3 },
+      { id: 4, name: "Transaction Complete", rank: 4 }
+    ];
+
+    // Determine current stage based on status
+    let currentStage = 1; // Default to first stage
+    switch (orderObj.status) {
+      case 'confirmed':
+      case 'processing':
+        currentStage = 2;
+        break;
+      case 'shipped':
+        currentStage = 3;
+        break;
+      case 'delivered':
+        currentStage = 4;
+        break;
+      default:
+        currentStage = 1;
+    }
+
+    orderObj.currentStage = currentStage;
+    orderObj.stages = orderStages.map(stage => ({
+      ...stage,
+      completed: stage.rank <= currentStage,
+      active: stage.rank === currentStage
+    }));
+
+    console.log('Successfully fetched order:', orderObj._id);
+    res.json(orderObj);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    console.error('Error fetching order by ID:', err.message);
+    console.error('Error stack:', err.stack);
+    console.error('Order ID:', req.params.id);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
   }
 };
 
-// @desc    Update order status
+// @desc    Get order by order number
+// @route   GET /api/orders/by-number/:orderNumber
+// @access  Private
+const getOrderByNumber = async (req, res) => {
+  try {
+    console.log('Fetching order by number:', req.params.orderNumber);
+    
+    // Find order by order number
+    const rawOrder = await Order.findOne({ orderNumber: req.params.orderNumber });
+    if (!rawOrder) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    console.log('Raw order structure:', {
+      hasUser: !!rawOrder.user,
+      hasBuyer: !!rawOrder.buyer,
+      hasItems: !!rawOrder.items,
+      hasProducts: !!rawOrder.products,
+      itemsLength: rawOrder.items ? rawOrder.items.length : 0,
+      productsLength: rawOrder.products ? rawOrder.products.length : 0,
+      orderKeys: Object.keys(rawOrder.toObject())
+    });
+
+    // Try to populate based on the order structure
+    let order;
+
+    // Populate using the new schema structure
+    order = await Order.findOne({ orderNumber: req.params.orderNumber })
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('shippingAddress')
+      .populate('deliveryMethod')
+      .populate('payments');
+
+    if (!order) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    // Check ownership
+    const orderOwnerId = order.buyer?._id || order.buyer;
+    if (!orderOwnerId) {
+      console.error('No buyer found in order:', order._id);
+      return res.status(500).json({ msg: 'Invalid order structure' });
+    }
+
+    // Convert to string for comparison
+    const ownerIdString = orderOwnerId.toString();
+    if (ownerIdString !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ msg: 'Access denied' });
+    }
+
+    // Ensure _id is a string for consistency
+    const orderObj = order.toObject();
+    orderObj._id = orderObj._id.toString();
+
+    // Flatten shipping address data for frontend compatibility
+    if (orderObj.shippingAddress) {
+      orderObj.shipping = {
+        name: `${orderObj.shippingAddress.firstName} ${orderObj.shippingAddress.lastName}`,
+        email: orderObj.shippingAddress.email,
+        phone: `${orderObj.shippingAddress.areaNumber}${orderObj.shippingAddress.phoneNumber}`,
+        address: orderObj.shippingAddress.streetAddress
+      };
+    }
+
+    // Flatten delivery method data for frontend compatibility
+    if (orderObj.deliveryMethod) {
+      orderObj.delivery = {
+        method: orderObj.deliveryMethod.name,
+        timeframe: orderObj.deliveryMethod.estimatedDeliveryTime
+      };
+    }
+
+    // Flatten pricing data for frontend compatibility
+    orderObj.pricing = {
+      subtotal: orderObj.subTotal,
+      delivery: orderObj.deliveryFee,
+      total: orderObj.calculatedTotal || orderObj.totalAmount
+    };
+
+    // Flatten product data for frontend compatibility
+    if (orderObj.items && orderObj.items.length > 0) {
+      const firstItem = orderObj.items[0];
+      orderObj.product = {
+        name: firstItem.productName || firstItem.product?.name || 'Product',
+        variant: firstItem.variant?.name || '',
+        quantity: firstItem.quantity,
+        price: firstItem.unitPrice,
+        images: firstItem.product?.images || []
+      };
+    }
+
+    console.log('Successfully fetched order by number:', orderObj.orderNumber);
+    res.json(orderObj);
+  } catch (err) {
+    console.error('Error fetching order by number:', err.message);
+    console.error('Error stack:', err.stack);
+    console.error('Order number:', req.params.orderNumber);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
+  }
+};
+
+// @desc    Update order status (admin or owner)
 // @route   PUT /api/orders/:id/status
 // @access  Private
 const updateOrderStatus = async (req, res) => {
@@ -136,7 +906,13 @@ const updateOrderStatus = async (req, res) => {
     await order.save();
 
     const updatedOrder = await Order.findById(order._id)
-      .populate('products.product', ['name', 'price', 'image'])
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
       .populate('buyer', ['name', 'email', 'walletAddress']);
 
     res.json({
@@ -149,9 +925,558 @@ const updateOrderStatus = async (req, res) => {
   }
 };
 
+// @desc    Admin: list all orders
+// @route   GET /api/admin/orders
+// @access  Private (admin)
+const adminListOrders = async (req, res) => {
+  try {
+    const orders = await Order.find()
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .sort({ orderDate: -1 });
+
+    // Ensure all order IDs are strings
+    const ordersWithStringIds = orders.map(order => {
+      const orderObj = order.toObject();
+      orderObj._id = orderObj._id.toString();
+      return orderObj;
+    });
+
+    res.json(ordersWithStringIds);
+  } catch (err) {
+    console.error('Error fetching admin orders:', err.message);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
+  }
+};
+
+// @desc    Admin: get order by id
+// @route   GET /api/admin/orders/:id
+// @access  Private (admin)
+const adminGetOrderById = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id)
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress']);
+    
+    if (!order) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    // Ensure _id is a string
+    const orderObj = order.toObject();
+    orderObj._id = orderObj._id.toString();
+
+    res.json(orderObj);
+  } catch (err) {
+    console.error('Error fetching admin order by ID:', err.message);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
+  }
+};
+
+// @desc    Admin: update order (status, tracking, delivery method, shipping address)
+// @route   PUT /api/admin/orders/:id
+// @access  Private (admin)
+const adminUpdateOrder = async (req, res) => {
+  try {
+    const { status, trackingNumber, deliveryMethodId, shippingAddress } = req.body;
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ msg: 'Order not found' });
+
+    if (status) {
+      const validStatuses = ['Created', 'Paid', 'Shipped', 'Delivered', 'Cancelled'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ msg: 'Invalid order status' });
+      }
+      order.orderStatus = status;
+    }
+
+    if (trackingNumber !== undefined) {
+      order.trackingNumber = trackingNumber;
+    }
+
+    if (deliveryMethodId) {
+      const method = await DeliveryMethod.findById(deliveryMethodId);
+      if (!method) return res.status(400).json({ msg: 'Invalid delivery method' });
+      order.deliveryMethod = method._id;
+      order.deliveryFee = method.price || 0;
+      order.totalAmount = (order.subTotal || 0) + order.deliveryFee;
+    }
+
+    if (shippingAddress) {
+      order.shippingAddress = shippingAddress;
+    }
+
+    await order.save();
+
+    const updated = await Order.findById(order._id)
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('deliveryMethod');
+    res.json(updated);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+};
+
+// @desc    Get order by Paystack reference
+// @route   GET /api/orders/by-reference/:reference
+// @access  Private
+const getOrderByPaystackReference = async (req, res) => {
+  try {
+    const { reference } = req.params;
+
+    const order = await Order.findOne({
+      paystackReference: reference,
+      buyer: req.user.id // Ensure user owns this order
+    })
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress']);
+
+    if (!order) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    res.json(order);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+};
+
+// @desc    Verify payment and create/update order
+// @route   POST /api/orders/verify-payment
+// @access  Private
+const verifyPaymentAndCreateOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  let transactionCommitted = false;
+
+  try {
+    const {
+      paymentMethod,
+      paystackReference,
+      deliveryMethodId,
+      shippingAddressId,
+      currency = 'USDT',
+      notes = ''
+    } = req.body;
+
+    // Get user's cart
+    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price', 'images', 'currency', 'name']).session(session);
+    if (!cart || cart.items.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'Cart is empty' });
+    }
+
+    // Filter out ordered items - only process active items
+    const activeItems = cart.items.filter(item => item.status !== 'ordered');
+    if (activeItems.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'No active items in cart' });
+    }
+
+    // Calculate totals - convert all prices to order currency before summing
+    let subTotal = 0;
+    for (const item of activeItems) {
+      // Convert item price to order currency if different
+      let itemPrice = item.product.price;
+      if (item.product.currency && item.product.currency !== currency) {
+        // For now, assume USDT/USD are 1:1, and NGN conversion
+        if (item.product.currency === 'NGN' && currency === 'USDT') {
+          itemPrice = item.product.price / 1500; // Convert NGN to USDT
+        } else if (item.product.currency === 'USDT' && currency === 'NGN') {
+          itemPrice = item.product.price * 1500; // Convert USDT to NGN
+        }
+        // Add more conversion logic as needed for other currencies
+      }
+      subTotal += itemPrice * item.quantity;
+    }
+
+    // Get delivery method
+    const deliveryMethod = await DeliveryMethod.findById(deliveryMethodId).session(session);
+    if (!deliveryMethod) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'Invalid delivery method' });
+    }
+
+    const totalAmount = subTotal + deliveryMethod.price;
+
+    // Validate required fields before creating order
+    if (!deliveryMethodId) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'Delivery method is required' });
+    }
+
+    if (!req.user || !req.user.id) {
+      await session.abortTransaction();
+      return res.status(401).json({ msg: 'User authentication required' });
+    }
+
+    // Validate delivery method exists
+    if (!deliveryMethod) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'Invalid delivery method' });
+    }
+
+    // Validate shipping address exists if provided
+    if (shippingAddressId) {
+      const shippingAddress = await require('../models/DeliveryAddress').findById(shippingAddressId).session(session);
+      if (!shippingAddress) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'Invalid shipping address' });
+      }
+    }
+
+    // Create main order first
+    const order = new Order({
+      buyer: req.user.id,
+      shippingAddress: shippingAddressId || null,
+      deliveryMethod: deliveryMethodId,
+      subTotal,
+      deliveryFee: deliveryMethod.price,
+      totalAmount,
+      currency,
+      status: 'confirmed',
+      paymentStatus: 'paid',
+      notes
+    });
+
+    await order.save({ session });
+
+    // Create order items with order reference
+    const orderItems = [];
+    for (const cartItem of activeItems) {
+      const orderItem = new OrderItem({
+        order: order._id,
+        product: cartItem.product._id,
+        // variant: cartItem.variant || null, // Include variant data from cart
+        quantity: cartItem.quantity,
+        unitPrice: cartItem.unitPrice || cartItem.product.price,
+        totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
+        currency: cartItem.currency || currency,
+        status: 'ordered',
+        // Include product image data directly
+        productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
+        productName: cartItem.product.name
+      });
+      await orderItem.save({ session });
+      orderItems.push(orderItem._id);
+    }
+
+    // Update order with items reference
+    order.items = orderItems;
+    await order.save({ session });
+
+    // Create payment record
+    let paymentData = {
+      order: order._id,
+      user: req.user.id,
+      amount: totalAmount,
+      currency,
+      method: paymentMethod,
+      status: 'completed',
+      paymentDate: new Date()
+    };
+
+    if (paymentMethod === 'paystack') {
+      // Verify Paystack payment
+      const referenceString = typeof paystackReference === 'string'
+        ? paystackReference
+        : paystackReference?.reference;
+
+      if (!referenceString) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'Paystack reference is required' });
+      }
+
+      const verification = await Paystack.transaction.verify({ reference: referenceString });
+
+      if (!verification.status || verification.data.status !== 'success') {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'Payment verification failed' });
+      }
+
+      paymentData.reference = referenceString;
+      paymentData.paystackReference = referenceString;
+    } else if (paymentMethod === 'wallet') {
+      paymentData.walletAddress = req.user.walletAddress;
+    }
+
+    const payment = new Payment(paymentData);
+    await payment.save({ session });
+
+    // Update order with payment reference
+    order.payments = [payment._id];
+    await order.save({ session });
+
+    // Mark only the active cart items as ordered (preserve already ordered items)
+    cart.items = cart.items.map(item => {
+      const itemObj = item.toObject();
+      // Only mark as ordered if it was in the activeItems (i.e., it was processed in this order)
+      if (activeItems.some(activeItem => activeItem.productId.toString() === item.productId.toString())) {
+        itemObj.status = 'ordered';
+      }
+      return itemObj;
+    });
+    await cart.save({ session });
+
+    // Award referral bonus
+    if (req.user.referredBy) {
+      await awardReferralBonus(req.user.id, totalAmount);
+    }
+
+    await session.commitTransaction();
+    transactionCommitted = true;
+
+    // Return minimal order object for faster response
+    const orderObj = order.toObject();
+    orderObj._id = orderObj._id.toString();
+
+    return res.json({
+      _id: orderObj._id,
+      orderNumber: orderObj.orderNumber,
+      status: orderObj.status,
+      paymentStatus: orderObj.paymentStatus,
+      totalAmount: orderObj.totalAmount,
+      currency: orderObj.currency,
+      paymentMethod: orderObj.paymentMethod,
+      createdAt: orderObj.createdAt,
+      orderId: orderObj._id,
+      message: 'Order created and payment confirmed successfully'
+    });
+
+  } catch (error) {
+    if (!transactionCommitted) {
+      await session.abortTransaction();
+    }
+    console.error('Payment verification error:', error);
+    res.status(500).json({ msg: 'Payment verification failed', error: error.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+// @desc    Get orders with pagination and filtering
+// @route   GET /api/orders/paginated
+// @access  Private
+const getOrdersPaginated = async (req, res) => {
+  try {
+    const { page = 1, limit = 10, status = 'all' } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build filter query
+    let statusFilter = {};
+    if (status && status !== 'all') {
+      switch (status) {
+        case 'to-be-received':
+          statusFilter = { status: { $in: ['pending', 'confirmed', 'processing', 'shipped'] } };
+          break;
+        case 'completed':
+          statusFilter = { status: 'delivered' };
+          break;
+        case 'cancelled':
+          statusFilter = { status: { $in: ['cancelled', 'refunded'] } };
+          break;
+        default:
+          // For specific status values, filter by exact match
+          statusFilter = { status };
+      }
+    }
+
+    const filter = {
+      buyer: req.user.id,
+      ...statusFilter
+    };
+
+    // Get total count for pagination
+    const totalOrders = await Order.countDocuments(filter);
+
+    // Get paginated orders
+    const orders = await Order.find(filter)
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images currency'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('shippingAddress')
+      .populate('deliveryMethod')
+      .populate('payments')
+      .sort({ orderDate: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Debug logging to see the actual data structure
+    if (orders.length > 0) {
+      console.log('Orders data structure:', JSON.stringify(orders[0], null, 2));
+      console.log('First order item product:', orders[0].items?.[0]?.product);
+      
+      // Check if product is populated correctly
+      const firstItem = orders[0].items?.[0];
+      if (firstItem && firstItem.product) {
+        console.log('Product population check:', {
+          productId: firstItem.product._id,
+          hasImages: !!firstItem.product.images,
+          imagesLength: firstItem.product.images?.length || 0,
+          hasVariants: !!firstItem.product.variants,
+          variantsLength: firstItem.product.variants?.length || 0,
+          hasFirstImage: !!firstItem.product.firstImage,
+          firstImage: firstItem.product.firstImage,
+          productKeys: Object.keys(firstItem.product)
+        });
+      }
+    }
+
+    // Ensure all order IDs are strings and manually populate product data if needed
+    const ordersWithStringIds = await Promise.all(orders.map(async (order) => {
+      const orderObj = order.toObject();
+      orderObj._id = orderObj._id.toString();
+
+      // Flatten shipping address data for frontend compatibility
+      if (orderObj.shippingAddress) {
+        orderObj.shipping = {
+          name: `${orderObj.shippingAddress.firstName} ${orderObj.shippingAddress.lastName}`,
+          email: orderObj.shippingAddress.email,
+          phone: `${orderObj.shippingAddress.areaNumber}${orderObj.shippingAddress.phoneNumber}`,
+          address: orderObj.shippingAddress.streetAddress
+        };
+      }
+
+      // Flatten delivery method data for frontend compatibility
+      if (orderObj.deliveryMethod) {
+        orderObj.delivery = {
+          method: orderObj.deliveryMethod.name,
+          timeframe: orderObj.deliveryMethod.estimatedDeliveryTime
+        };
+      }
+
+      // Flatten pricing data for frontend compatibility
+      orderObj.pricing = {
+        subtotal: orderObj.subTotal,
+        delivery: orderObj.deliveryFee,
+        total: orderObj.totalAmount
+      };
+
+      // Flatten product data for frontend compatibility
+      if (orderObj.items && orderObj.items.length > 0) {
+        const firstItem = orderObj.items[0];
+        orderObj.product = {
+          name: firstItem.productName || firstItem.product?.name || 'Product',
+          variant: firstItem.variant?.name || '',
+          quantity: firstItem.quantity,
+          price: firstItem.unitPrice,
+          images: firstItem.product?.images || []
+        };
+      }
+
+      // Check if product data is incomplete and manually populate if needed
+      if (orderObj.items && orderObj.items.length > 0) {
+        for (let item of orderObj.items) {
+          if (item.product && (!item.product.images || item.product.images.length === 0 || !item.product.hasOwnProperty('images'))) {
+            try {
+              // Manually fetch the product with full data
+              const Product = require('../models/Product');
+              const fullProduct = await Product.findById(item.product._id).lean();
+              console.log('Manual population - fetched product:', {
+                id: fullProduct?._id,
+                name: fullProduct?.name,
+                hasImages: !!fullProduct?.images,
+                imagesLength: fullProduct?.images?.length || 0,
+                images: fullProduct?.images
+              });
+              if (fullProduct) {
+                item.product = {
+                  ...item.product,
+                  images: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images : ['/images/desktop-1.png'],
+                  variants: fullProduct.variants || [],
+                  firstImage: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images[0] : '/images/desktop-1.png'
+                };
+                console.log('Manually populated product:', item.product._id, 'with images:', item.product.images?.length || 0);
+              }
+            } catch (error) {
+              console.error('Error manually populating product:', error);
+            }
+          }
+        }
+      }
+
+      return orderObj;
+    }));
+
+    // Final fallback - ensure all products have images
+    ordersWithStringIds.forEach(order => {
+      if (order.items && order.items.length > 0) {
+        order.items.forEach(item => {
+          if (item.product && (!item.product.images || item.product.images.length === 0)) {
+            item.product.images = ['/images/desktop-1.png'];
+            item.product.firstImage = '/images/desktop-1.png';
+            console.log('Final fallback - added placeholder image for product:', item.product._id);
+          }
+        });
+      }
+    });
+
+    const totalPages = Math.ceil(totalOrders / limitNum);
+
+    res.json({
+      orders: ordersWithStringIds,
+      pagination: {
+        currentPage: pageNum,
+        totalPages,
+        totalOrders,
+        hasNextPage: pageNum < totalPages,
+        hasPrevPage: pageNum > 1,
+        limit: limitNum
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching paginated orders:', err.message);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
+  }
+};
+
 module.exports = {
   createOrder,
+  checkoutFromCart,
+  handlePaystackWebhook,
   getOrders,
+  getOrdersPaginated,
   getOrderById,
+  getOrderByNumber,
+  getOrderByPaystackReference,
+  verifyPaymentAndCreateOrder,
   updateOrderStatus,
+  adminListOrders,
+  adminGetOrderById,
+  adminUpdateOrder,
 };
