@@ -2,7 +2,7 @@ const Referral = require('../models/Referral');
 const User = require('../models/User');
 const { v4: uuidv4 } = require('uuid');
 
-const REFERRAL_REWARD_AMOUNT = 10; // 10 USDT
+const REFERRAL_REWARD_AMOUNT = 4; // 4 USDT
 
 // @desc    Generate a referral link for the authenticated user
 // @route   POST /api/referrals/generate

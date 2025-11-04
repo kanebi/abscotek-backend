@@ -256,7 +256,7 @@ const checkoutFromCart = async (req, res) => {
 
         if (existingOrder) {
           // Update existing order status
-          existingOrder.status = 'paid';
+          existingOrder.status = 'confirmed';
           existingOrder.paymentStatus = 'paid';
           existingOrder.paymentReference = paystackReference;
           await existingOrder.save();
@@ -307,7 +307,7 @@ const checkoutFromCart = async (req, res) => {
             deliveryMethod: deliveryMethodId,
             deliveryFee: deliveryMethod.price,
             totalAmount,
-            status: 'paid',
+            status: 'confirmed',
             paymentMethod: 'paystack',
             paymentStatus: 'paid',
             paystackReference,
@@ -368,7 +368,7 @@ const checkoutFromCart = async (req, res) => {
         deliveryMethod: deliveryMethodId,
         deliveryFee: deliveryMethod.price,
         totalAmount,
-        status: 'paid', // Wallet payments are immediately paid
+        status: 'confirmed', // Wallet payments are immediately paid
         paymentMethod: 'wallet',
         paymentStatus: 'paid',
         currency,
@@ -440,7 +440,7 @@ const handlePaystackWebhook = async (req, res) => {
         
         if (order && order.status === 'pending_payment') {
           // Update order status to paid
-          order.status = 'paid';
+          order.status = 'confirmed';
           order.paymentStatus = 'paid';
           order.paymentReference = reference;
           await order.save();
@@ -1200,7 +1200,9 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
       currency,
       method: paymentMethod,
       status: 'completed',
-      paymentDate: new Date()
+      paymentDate: new Date(),
+      type: 'refund',
+      refundReason: 'Order cancelled by customer'
     };
 
     if (paymentMethod === 'paystack') {
@@ -1465,6 +1467,320 @@ const getOrdersPaginated = async (req, res) => {
   }
 };
 
+// @desc    Cancel order and process refund
+// @route   POST /api/orders/:id/cancel
+// @access  Private
+const cancelOrder = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    // Check if user owns this order
+    if (order.buyer.toString() !== req.user.id) {
+      return res.status(403).json({ msg: 'Access denied' });
+    }
+
+    // Check if order can be cancelled (only before shipping)
+    const cancellableStatuses = ['pending', 'confirmed', 'processing'];
+    if (!cancellableStatuses.includes(order.status)) {
+      return res.status(400).json({
+        msg: 'Order cannot be cancelled at this stage. Please contact support if you need assistance.'
+      });
+    }
+
+    // Update order status to cancelled
+    order.status = 'cancelled';
+    order.cancelledAt = new Date();
+    order.cancelledBy = req.user.id;
+
+    // Create refund record
+    const Payment = require('../models/Payment');
+    const refundPayment = new Payment({
+      order: order._id,
+      user: req.user.id,
+      amount: order.totalAmount,
+      currency: order.currency,
+      method: order.paymentMethod || 'wallet',
+      status: 'pending',
+      paymentDate: new Date(),
+      notes: 'Refund initiated due to order cancellation'
+    });
+
+    await refundPayment.save();
+
+    // Update order with refund reference
+    order.payments = order.payments || [];
+    order.payments.push(refundPayment._id);
+
+    await order.save();
+
+    // Populate order details for response
+    const populatedOrder = await Order.findById(order._id)
+      .populate({
+        path: 'items',
+        populate: {
+          path: 'product',
+          select: 'name price images currency'
+        }
+      })
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('shippingAddress')
+      .populate('deliveryMethod')
+      .populate('payments');
+
+    // Flatten data for frontend compatibility
+    const orderObj = populatedOrder.toObject();
+    orderObj._id = orderObj._id.toString();
+
+    if (orderObj.shippingAddress) {
+      orderObj.shipping = {
+        name: `${orderObj.shippingAddress.firstName} ${orderObj.shippingAddress.lastName}`,
+        email: orderObj.shippingAddress.email,
+        phone: `${orderObj.shippingAddress.areaNumber}${orderObj.shippingAddress.phoneNumber}`,
+        address: orderObj.shippingAddress.streetAddress
+      };
+    }
+
+    if (orderObj.deliveryMethod) {
+      orderObj.delivery = {
+        method: orderObj.deliveryMethod.name,
+        timeframe: orderObj.deliveryMethod.estimatedDeliveryTime
+      };
+    }
+
+    orderObj.pricing = {
+      subtotal: orderObj.subTotal,
+      delivery: orderObj.deliveryFee,
+      total: orderObj.totalAmount
+    };
+
+    if (orderObj.items && orderObj.items.length > 0) {
+      const firstItem = orderObj.items[0];
+      orderObj.product = {
+        name: firstItem.productName || firstItem.product?.name || 'Product',
+        variant: firstItem.variant?.name || '',
+        quantity: firstItem.quantity,
+        price: firstItem.unitPrice,
+        images: firstItem.product?.images || []
+      };
+    }
+
+    // Add order stages mapping
+    const orderStages = [
+      { id: 1, name: "Submit Order", rank: 1 },
+      { id: 2, name: "Waiting for Delivery", rank: 2 },
+      { id: 3, name: "Out for delivery", rank: 3 },
+      { id: 4, name: "Transaction Complete", rank: 4 }
+    ];
+
+    let currentStage = 1;
+    switch (orderObj.status) {
+      case 'confirmed':
+      case 'processing':
+        currentStage = 2;
+        break;
+      case 'shipped':
+        currentStage = 3;
+        break;
+      case 'delivered':
+        currentStage = 4;
+        break;
+      default:
+        currentStage = 1;
+    }
+
+    orderObj.currentStage = currentStage;
+    orderObj.stages = orderStages.map(stage => ({
+      ...stage,
+      completed: stage.rank <= currentStage,
+      active: stage.rank === currentStage
+    }));
+
+    res.json({
+      ...orderObj,
+      message: 'Order cancelled successfully. Refund will be processed within 3-5 business days.',
+      refundId: refundPayment._id
+    });
+  } catch (err) {
+    console.error('Error cancelling order:', err);
+    res.status(500).json({ msg: 'Server Error', error: err.message });
+  }
+};
+
+// @desc    Process USDT wallet payment
+// @route   POST /api/orders/usdt-payment
+// @access  Private
+const processUSDTWalletPayment = async (req, res) => {
+  try {
+    const {
+      deliveryMethodId,
+      shippingAddressId,
+      currency = 'USDT',
+      notes = ''
+    } = req.body;
+
+    // Check if user has Privy wallet
+    if (!req.user.walletAddress) {
+      return res.status(400).json({
+        msg: 'Wallet address not found. Please connect your wallet first.',
+        fallback: 'wallet_debit'
+      });
+    }
+
+    // Get user's cart
+    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price', 'images', 'currency', 'name']);
+    if (!cart || cart.items.length === 0) {
+      return res.status(400).json({ msg: 'Cart is empty' });
+    }
+
+    // Filter out ordered items - only process active items
+    const activeItems = cart.items.filter(item => item.status !== 'ordered');
+    if (activeItems.length === 0) {
+      return res.status(400).json({ msg: 'No active items in cart' });
+    }
+
+    // Calculate totals
+    let subTotal = 0;
+    for (const item of activeItems) {
+      let itemPrice = item.product.price;
+      if (item.product.currency && item.product.currency !== currency) {
+        if (item.product.currency === 'NGN' && currency === 'USDT') {
+          itemPrice = item.product.price / 1500;
+        } else if (item.product.currency === 'USDT' && currency === 'NGN') {
+          itemPrice = item.product.price * 1500;
+        }
+      }
+      subTotal += itemPrice * item.quantity;
+    }
+
+    // Get delivery method
+    const deliveryMethod = await DeliveryMethod.findById(deliveryMethodId);
+    if (!deliveryMethod) {
+      return res.status(400).json({ msg: 'Invalid delivery method' });
+    }
+
+    const totalAmount = subTotal + deliveryMethod.price;
+
+    // Check if user has sufficient balance
+    if (req.user.platformBalance < totalAmount) {
+      return res.status(400).json({
+        msg: 'Insufficient USDT balance. Please top up your account or use a different payment method.',
+        required: totalAmount,
+        available: req.user.platformBalance,
+        shortfall: totalAmount - req.user.platformBalance
+      });
+    }
+
+    // Deduct from user's platform balance
+    req.user.platformBalance -= totalAmount;
+    await req.user.save();
+
+    // Create order
+    const order = new Order({
+      buyer: req.user.id,
+      shippingAddress: shippingAddressId || null,
+      deliveryMethod: deliveryMethodId,
+      subTotal,
+      deliveryFee: deliveryMethod.price,
+      totalAmount,
+      currency,
+      status: 'confirmed',
+      paymentStatus: 'paid',
+      paymentMethod: 'usdt_wallet',
+      notes
+    });
+
+    await order.save();
+
+    // Create order items
+    const orderItems = [];
+    for (const cartItem of activeItems) {
+      const orderItem = new OrderItem({
+        order: order._id,
+        product: cartItem.product._id,
+        quantity: cartItem.quantity,
+        unitPrice: cartItem.unitPrice || cartItem.product.price,
+        totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
+        currency: cartItem.currency || currency,
+        status: 'ordered',
+        productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
+        productName: cartItem.product.name
+      });
+      await orderItem.save();
+      orderItems.push(orderItem._id);
+    }
+
+    // Update order with items reference
+    order.items = orderItems;
+    await order.save();
+
+    // Create payment record
+    const payment = new Payment({
+      order: order._id,
+      user: req.user.id,
+      amount: totalAmount,
+      currency,
+      method: 'usdt_wallet',
+      status: 'completed',
+      paymentDate: new Date(),
+      walletAddress: req.user.walletAddress
+    });
+
+    await payment.save();
+
+    // Update order with payment reference
+    order.payments = [payment._id];
+    await order.save();
+
+    // Mark cart items as ordered
+    cart.items = cart.items.map(item => {
+      const itemObj = item.toObject();
+      if (activeItems.some(activeItem => activeItem.productId.toString() === item.productId.toString())) {
+        itemObj.status = 'ordered';
+      }
+      return itemObj;
+    });
+    await cart.save();
+
+    // Award referral bonus
+    if (req.user.referredBy) {
+      await awardReferralBonus(req.user.id, totalAmount);
+    }
+
+    const orderObj = order.toObject();
+    orderObj._id = orderObj._id.toString();
+
+    return res.json({
+      _id: orderObj._id,
+      orderNumber: orderObj.orderNumber,
+      status: orderObj.status,
+      paymentStatus: orderObj.paymentStatus,
+      totalAmount: orderObj.totalAmount,
+      currency: orderObj.currency,
+      paymentMethod: orderObj.paymentMethod,
+      createdAt: orderObj.createdAt,
+      orderId: orderObj._id,
+      message: 'USDT payment processed successfully'
+    });
+
+  } catch (error) {
+    console.error('USDT wallet payment error:', error);
+
+    // If USDT wallet payment fails, suggest fallback to wallet debit
+    if (error.message.includes('wallet') || error.message.includes('balance') || error.message.includes('Insufficient')) {
+      return res.status(400).json({
+        msg: 'USDT wallet payment failed. Please try wallet debit method.',
+        fallback: 'wallet_debit',
+        error: error.message
+      });
+    }
+
+    res.status(500).json({ msg: 'Payment processing failed', error: error.message });
+  }
+};
+
 module.exports = {
   createOrder,
   checkoutFromCart,
@@ -1475,7 +1791,9 @@ module.exports = {
   getOrderByNumber,
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
+  processUSDTWalletPayment,
   updateOrderStatus,
+  cancelOrder,
   adminListOrders,
   adminGetOrderById,
   adminUpdateOrder,

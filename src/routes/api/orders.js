@@ -10,8 +10,10 @@ const {
   getOrderById,
   getOrderByNumber,
   updateOrderStatus,
+  cancelOrder,
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
+  processUSDTWalletPayment,
 } = require('../../controllers/orderController');
 
 /**
@@ -371,6 +373,7 @@ router.get('/:id', auth, getOrderById);
 router.get('/by-number/:orderNumber', auth, getOrderByNumber);
 router.get('/by-reference/:reference', auth, getOrderByPaystackReference);
 router.post('/verify-payment', auth, verifyPaymentAndCreateOrder);
+router.post('/usdt-payment', auth, processUSDTWalletPayment);
 
 /**
  * @swagger
@@ -419,6 +422,47 @@ router.post('/verify-payment', auth, verifyPaymentAndCreateOrder);
  *         description: Server error
  */
 router.put('/:id/status', auth, updateOrderStatus);
+
+/**
+ * @swagger
+ * /api/orders/{id}/cancel:
+ *   post:
+ *     summary: Cancel order and request refund
+ *     description: Cancel an order and initiate refund process. Only available for orders that haven't been shipped yet.
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Order ID
+ *     responses:
+ *       200:
+ *         description: Order cancelled successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 refundId:
+ *                   type: string
+ *       400:
+ *         description: Order cannot be cancelled
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Access denied
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Server error
+ */
+router.post('/:id/cancel', auth, cancelOrder);
 
 // Paystack webhook route (no auth required)
 router.post('/paystack/webhook', handlePaystackWebhook);

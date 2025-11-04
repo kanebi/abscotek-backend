@@ -33,7 +33,7 @@ const updateItemQuantity = async (req, res) => {
     cart.total = cart.subtotal + (cart.deliveryFee || 0) - (cart.discount || 0);
 
     await cart.save();
-    await cart.populate('items.product', 'name price image');
+    await cart.populate('items.product', 'name price images firstImage');
 
     // Filter out ordered items and ensure each active cart item has the product image properly mapped
     if (cart && cart.items) {
@@ -59,17 +59,50 @@ const updateItemQuantity = async (req, res) => {
 // @access  Private
 const getCart = async (req, res) => {
   try {
-    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', 'name price image');
+    let cart = await Cart.findOne({ user: req.user.id });
 
     // Filter out ordered items and ensure each active cart item has the product image properly mapped
     if (cart && cart.items) {
-      cart.items = cart.items
+      cart.items = await Promise.all(cart.items
         .filter(item => item.status !== 'ordered') // Only return active items
-        .map(item => ({
-          ...item.toObject(),
-          image: item.product?.image || item.image, // Use image from product or fallback to existing image
-          name: item.product?.name || item.name,
-          price: item.product?.price || item.price || item.unitPrice
+        .map(async (item) => {
+          // Always populate fresh product data to ensure images are included
+          const Product = require('../models/Product');
+          const fullProduct = await Product.findById(item.productId).select('name price images firstImage').lean();
+
+          console.log('Backend - Product data for cart item:', {
+            productId: item.productId,
+            productName: fullProduct?.name,
+            hasImages: !!fullProduct?.images,
+            imagesLength: fullProduct?.images?.length || 0,
+            images: fullProduct?.images,
+            firstImage: fullProduct?.firstImage
+          });
+
+          const processedItem = {
+            ...item.toObject(),
+            product: {
+              _id: fullProduct?._id || item.productId,
+              name: fullProduct?.name || item.product?.name || item.name || 'Product',
+              price: fullProduct?.price || item.product?.price || item.price || item.unitPrice,
+              images: fullProduct?.images || item.product?.images || [],
+              firstImage: fullProduct?.firstImage || item.product?.firstImage
+            },
+            productId: item.productId,
+            image: fullProduct?.images?.[0] || fullProduct?.firstImage || item.product?.images?.[0] || item.image,
+            images: fullProduct?.images || item.product?.images || [item.image],
+            name: fullProduct?.name || item.product?.name || item.name,
+            price: fullProduct?.price || item.product?.price || item.price || item.unitPrice
+          };
+
+          console.log('Backend - Processed cart item:', {
+            productId: processedItem.productId,
+            name: processedItem.name,
+            image: processedItem.image,
+            imagesCount: processedItem.images?.length || 0
+          });
+
+          return processedItem;
         }));
 
       // Recalculate totals based on active items only
@@ -88,9 +121,19 @@ const getCart = async (req, res) => {
       await cart.save();
     }
 
+    console.log('Backend - Final cart response:', {
+      itemCount: cart.items?.length || 0,
+      firstItem: cart.items?.[0] ? {
+        name: cart.items[0].name,
+        hasImage: !!cart.items[0].image,
+        image: cart.items[0].image,
+        imagesCount: cart.items[0].images?.length || 0
+      } : null
+    });
+
     res.json(cart);
   } catch (err) {
-    console.error(err.message);
+    console.error('Cart fetch error:', err.message);
     res.status(500).send('Server Error');
   }
 };
@@ -113,13 +156,25 @@ const getCartByUserId = async (req, res) => {
 
     // Filter out ordered items and ensure each active cart item has the product image properly mapped
     if (cart && cart.items) {
-      cart.items = cart.items
+      cart.items = await Promise.all(cart.items
         .filter(item => item.status !== 'ordered') // Only return active items
-        .map(item => ({
-          ...item.toObject(),
-          image: item.product?.image || item.image, // Use image from product or fallback to existing image
-          name: item.product?.name || item.name,
-          price: item.product?.price || item.price || item.unitPrice
+        .map(async (item) => {
+          // Populate product data if not already populated
+          if (!item.product || !item.product.name) {
+            const Product = require('../models/Product');
+            const fullProduct = await Product.findById(item.productId).select('name price images firstImage').lean();
+            if (fullProduct) {
+              item.product = fullProduct;
+            }
+          }
+
+          return {
+            ...item.toObject(),
+            image: item.product?.images?.[0] || item.product?.firstImage || item.image,
+            images: item.product?.images || [item.image],
+            name: item.product?.name || item.name,
+            price: item.product?.price || item.price || item.unitPrice
+          };
         }));
 
       // Recalculate totals based on active items only
@@ -202,17 +257,50 @@ const addItemToCart = async (req, res) => {
     if (!cart.currency) cart.currency = currency || 'USDT';
 
     await cart.save();
-    await cart.populate('items.product', 'name price image');
+    await cart.populate('items.product', 'name price images firstImage');
 
     // Filter out ordered items and ensure each active cart item has the product image properly mapped
     if (cart && cart.items) {
-      cart.items = cart.items
+      cart.items = await Promise.all(cart.items
         .filter(item => item.status !== 'ordered') // Only return active items
-        .map(item => ({
-          ...item.toObject(),
-          image: item.product?.image || item.image, // Use image from product or fallback to existing image
-          name: item.product?.name || item.name,
-          price: item.product?.price || item.price || item.unitPrice
+        .map(async (item) => {
+          // Always populate fresh product data to ensure images are included
+          const Product = require('../models/Product');
+          const fullProduct = await Product.findById(item.productId).select('name price images firstImage').lean();
+
+          console.log('Backend - Add to cart - Product data for cart item:', {
+            productId: item.productId,
+            productName: fullProduct?.name,
+            hasImages: !!fullProduct?.images,
+            imagesLength: fullProduct?.images?.length || 0,
+            images: fullProduct?.images,
+            firstImage: fullProduct?.firstImage
+          });
+
+          const processedItem = {
+            ...item.toObject(),
+            product: {
+              _id: fullProduct?._id || item.productId,
+              name: fullProduct?.name || item.product?.name || item.name || 'Product',
+              price: fullProduct?.price || item.product?.price || item.price || item.unitPrice,
+              images: fullProduct?.images || item.product?.images || [],
+              firstImage: fullProduct?.firstImage || item.product?.firstImage
+            },
+            productId: item.productId,
+            image: fullProduct?.images?.[0] || fullProduct?.firstImage || item.product?.images?.[0] || item.image,
+            images: fullProduct?.images || item.product?.images || [item.image],
+            name: fullProduct?.name || item.product?.name || item.name,
+            price: fullProduct?.price || item.product?.price || item.price || item.unitPrice
+          };
+
+          console.log('Backend - Add to cart - Processed cart item:', {
+            productId: processedItem.productId,
+            name: processedItem.name,
+            image: processedItem.image,
+            imagesCount: processedItem.images?.length || 0
+          });
+
+          return processedItem;
         }));
     }
 
@@ -250,7 +338,7 @@ const removeItemFromCart = async (req, res) => {
     cart.total = cart.subtotal + (cart.deliveryFee || 0) - (cart.discount || 0);
 
     await cart.save();
-    await cart.populate('items.product', 'name price image');
+    await cart.populate('items.product', 'name price images firstImage');
 
     // Filter out ordered items and ensure each active cart item has the product image properly mapped
     if (cart && cart.items) {
@@ -258,7 +346,8 @@ const removeItemFromCart = async (req, res) => {
         .filter(item => item.status !== 'ordered') // Only return active items
         .map(item => ({
           ...item.toObject(),
-          image: item.product?.image || item.image, // Use image from product or fallback to existing image
+          image: item.product?.images?.[0] || item.image, // Use first image from product images array
+          images: item.product?.images || [item.image], // Include full images array
           name: item.product?.name || item.name,
           price: item.product?.price || item.price || item.unitPrice
         }));
