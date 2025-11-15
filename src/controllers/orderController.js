@@ -935,23 +935,52 @@ const adminListOrders = async (req, res) => {
         path: 'items',
         populate: {
           path: 'product',
-          select: 'name price images currency'
+          select: 'name price images currency variants'
         }
       })
       .populate('buyer', ['name', 'email', 'walletAddress'])
       .populate('deliveryMethod', ['name', 'price', 'currency'])
       .sort({ createdAt: -1 }); // Use createdAt instead of orderDate
 
-    // Ensure all order IDs are strings
+    // Ensure all order IDs are strings and fix product images
     const ordersWithStringIds = orders.map(order => {
       const orderObj = order.toObject();
       orderObj._id = orderObj._id.toString();
+      
+      // Ensure all items have product images - fallback to stored productImage or placeholder
+      if (orderObj.items && orderObj.items.length > 0) {
+        for (let item of orderObj.items) {
+          // If product is populated but missing images, use stored productImage or placeholder
+          if (item.product) {
+            if (!item.product.images || item.product.images.length === 0) {
+              item.product.images = item.productImage ? [item.productImage] : ['/images/desktop-1.png'];
+            }
+            // Ensure product name is available
+            if (!item.product.name && item.productName) {
+              item.product.name = item.productName;
+            }
+          } else {
+            // If product is not populated, create a minimal product object from stored data
+            item.product = {
+              _id: item.product || 'unknown',
+              name: item.productName || 'Product',
+              images: item.productImage ? [item.productImage] : ['/images/desktop-1.png'],
+              price: item.unitPrice,
+              currency: item.currency
+            };
+          }
+        }
+      }
+      
       return orderObj;
     });
 
     console.log('Total orders found:', ordersWithStringIds.length);
     if (ordersWithStringIds.length > 0) {
       console.log('First order items count:', ordersWithStringIds[0].items?.length || 0);
+      if (ordersWithStringIds[0].items?.length > 0) {
+        console.log('First order first item images:', ordersWithStringIds[0].items[0].product?.images);
+      }
     }
 
     res.json(ordersWithStringIds);
@@ -971,10 +1000,11 @@ const adminGetOrderById = async (req, res) => {
         path: 'items',
         populate: {
           path: 'product',
-          select: 'name price images currency'
+          select: 'name price images currency variants'
         }
       })
       .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('shippingAddress')
       .populate('deliveryMethod', ['name', 'price', 'currency']);
     
     if (!order) {
@@ -985,10 +1015,36 @@ const adminGetOrderById = async (req, res) => {
     const orderObj = order.toObject();
     orderObj._id = orderObj._id.toString();
 
+    // Ensure all items have product images - fallback to stored productImage or placeholder
+    if (orderObj.items && orderObj.items.length > 0) {
+      for (let item of orderObj.items) {
+        // If product is populated but missing images, use stored productImage or placeholder
+        if (item.product) {
+          if (!item.product.images || item.product.images.length === 0) {
+            item.product.images = item.productImage ? [item.productImage] : ['/images/desktop-1.png'];
+          }
+          // Ensure product name is available
+          if (!item.product.name && item.productName) {
+            item.product.name = item.productName;
+          }
+        } else {
+          // If product is not populated, create a minimal product object from stored data
+          item.product = {
+            _id: item.product || 'unknown',
+            name: item.productName || 'Product',
+            images: item.productImage ? [item.productImage] : ['/images/desktop-1.png'],
+            price: item.unitPrice,
+            currency: item.currency
+          };
+        }
+      }
+    }
+
     // Log for debugging
     console.log('Order items count:', orderObj.items?.length || 0);
     if (orderObj.items && orderObj.items.length > 0) {
-      console.log('First item:', JSON.stringify(orderObj.items[0], null, 2));
+      console.log('First item product images:', orderObj.items[0].product?.images);
+      console.log('First item productImage:', orderObj.items[0].productImage);
     }
 
     res.json(orderObj);
