@@ -12,6 +12,24 @@ This document outlines the available API routes, their methods, parameters, and 
 | `PUT` | `/api/admin/profile` | Update admin profile | None | `name` (string, optional), `email` (string, optional), `companyName` (string, optional), `phone` (string, optional) | `200`: Profile updated successfully (application/json)<br>`401`: Unauthorized<br>`404`: User not found<br>`500`: Server error |
 | `PUT` | `/api/admin/change-password` | Change admin password | None | `currentPassword` (string, required), `newPassword` (string, required) | `200`: Password changed successfully<br>`400`: Invalid current password<br>`401`: Unauthorized<br>`500`: Server error |
 
+## Admin User Management Routes (`/api/admin/users`)
+
+| Method | Path | Summary | Parameters | Request Body | Responses |
+|---|---|---|---|---|---|
+| `GET` | `/api/admin/users` | Get all users | `page` (number, optional), `limit` (number, optional), `search` (string, optional), `role` (string, optional) | None | `200`: List of users with pagination (application/json)<br>`401`: Unauthorized<br>`500`: Server error |
+| `GET` | `/api/admin/users/:id` | Get user by ID | `id` (path, string, required) | None | `200`: User object (application/json)<br>`401`: Unauthorized<br>`404`: User not found<br>`500`: Server error |
+| `POST` | `/api/admin/users` | Create new user | None | `name` (string, required), `email` (string, required), `password` (string, required), `role` (string, optional), `phone` (string, optional), `companyName` (string, optional) | `201`: User created successfully (application/json)<br>`400`: Bad request or email already exists<br>`401`: Unauthorized<br>`500`: Server error |
+| `PUT` | `/api/admin/users/:id` | Update user | `id` (path, string, required) | `name` (string, optional), `email` (string, optional), `password` (string, optional), `role` (string, optional), `phone` (string, optional), `companyName` (string, optional), `isVerified` (boolean, optional) | `200`: User updated successfully (application/json)<br>`400`: Bad request or email already in use<br>`401`: Unauthorized<br>`404`: User not found<br>`500`: Server error |
+| `DELETE` | `/api/admin/users/:id` | Delete user | `id` (path, string, required) | None | `200`: User deleted successfully<br>`400`: Cannot delete own account<br>`401`: Unauthorized<br>`404`: User not found<br>`500`: Server error |
+
+## Admin Order Management Routes (`/api/admin/orders`)
+
+| Method | Path | Summary | Parameters | Request Body | Responses |
+|---|---|---|---|---|---|
+| `GET` | `/api/admin/orders` | Get all orders | None | None | `200`: List of all orders with populated buyer and items (application/json)<br>`401`: Unauthorized<br>`500`: Server error |
+| `GET` | `/api/admin/orders/:id` | Get order by ID | `id` (path, string, required) | None | `200`: Order object with populated data (application/json)<br>`401`: Unauthorized<br>`404`: Order not found<br>`500`: Server error |
+| `PUT` | `/api/admin/orders/:id` | Update order | `id` (path, string, required) | `status` (string, optional - Created/Paid/Shipped/Delivered/Cancelled), `trackingNumber` (string, optional), `deliveryMethodId` (string, optional), `shippingAddress` (object, optional) | `200`: Updated order (application/json)<br>`400`: Invalid status or delivery method<br>`401`: Unauthorized<br>`404`: Order not found<br>`500`: Server error |
+
 ## Auth Routes (`/api/auth`)
 
 | Method | Path | Summary | Parameters | Request Body | Responses |

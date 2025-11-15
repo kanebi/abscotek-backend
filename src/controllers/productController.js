@@ -35,7 +35,7 @@ const createProduct = async (req, res) => {
       return res.status(400).json({ errors: errors.array().map(e => ({ msg: e.msg })) });
     }
 
-    const {
+    let {
       name,
       description = '',
       price,
@@ -46,10 +46,20 @@ const createProduct = async (req, res) => {
       brand = null,
       sku = null,
       specs = [],
+      variants = [],
       stock = 0,
       published = true,
       slug
     } = req.body;
+
+    // Convert empty strings to null for optional fields
+    if (badge === '') badge = null;
+    if (category === '') category = null;
+    if (brand === '') brand = null;
+    if (sku === '') sku = null;
+
+    console.log('req.body.variants:', req.body.variants);
+    console.log('variants after destructuring:', variants);
 
     if (!name || name.length < 2 || name.length > 120) {
       const e = buildError('Product name must be between 2 and 120 characters');
@@ -326,6 +336,14 @@ const updateProduct = async (req, res) => {
     if (updates.price && Number(updates.price) <= 0) {
       return res.status(400).json({ errors: [{ msg: 'Price must be greater than 0' }] });
     }
+
+    // Handle optional fields - convert empty strings to null for optional string fields
+    const optionalStringFields = ['badge', 'category', 'brand', 'sku'];
+    optionalStringFields.forEach(field => {
+      if (field in updates && updates[field] === '') {
+        updates[field] = null;
+      }
+    });
 
     const product = await Product.findByIdAndUpdate(
       req.params.id,

@@ -27,7 +27,7 @@ const {
  *       200:
  *         description: List of orders
  */
-router.get('/orders', auth.admin, adminListOrders);
+router.get('/', auth.admin, adminListOrders);
 
 /**
  * @swagger
@@ -47,7 +47,7 @@ router.get('/orders', auth.admin, adminListOrders);
  *       200:
  *         description: Order details
  */
-router.get('/orders/:id', auth.admin, adminGetOrderById);
+router.get('/:id', auth.admin, adminGetOrderById);
 
 /**
  * @swagger
@@ -83,7 +83,7 @@ router.get('/orders/:id', auth.admin, adminGetOrderById);
  *       200:
  *         description: Updated order
  */
-router.put('/orders/:id', auth.admin, adminUpdateOrder);
+router.put('/:id', auth.admin, adminUpdateOrder);
 
 module.exports = router;
 

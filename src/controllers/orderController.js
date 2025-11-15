@@ -935,11 +935,12 @@ const adminListOrders = async (req, res) => {
         path: 'items',
         populate: {
           path: 'product',
-          select: 'name price images'
+          select: 'name price images currency'
         }
       })
       .populate('buyer', ['name', 'email', 'walletAddress'])
-      .sort({ orderDate: -1 });
+      .populate('deliveryMethod', ['name', 'price', 'currency'])
+      .sort({ createdAt: -1 }); // Use createdAt instead of orderDate
 
     // Ensure all order IDs are strings
     const ordersWithStringIds = orders.map(order => {
@@ -947,6 +948,11 @@ const adminListOrders = async (req, res) => {
       orderObj._id = orderObj._id.toString();
       return orderObj;
     });
+
+    console.log('Total orders found:', ordersWithStringIds.length);
+    if (ordersWithStringIds.length > 0) {
+      console.log('First order items count:', ordersWithStringIds[0].items?.length || 0);
+    }
 
     res.json(ordersWithStringIds);
   } catch (err) {
@@ -965,10 +971,11 @@ const adminGetOrderById = async (req, res) => {
         path: 'items',
         populate: {
           path: 'product',
-          select: 'name price images'
+          select: 'name price images currency'
         }
       })
-      .populate('buyer', ['name', 'email', 'walletAddress']);
+      .populate('buyer', ['name', 'email', 'walletAddress'])
+      .populate('deliveryMethod', ['name', 'price', 'currency']);
     
     if (!order) {
       return res.status(404).json({ msg: 'Order not found' });
@@ -977,6 +984,12 @@ const adminGetOrderById = async (req, res) => {
     // Ensure _id is a string
     const orderObj = order.toObject();
     orderObj._id = orderObj._id.toString();
+
+    // Log for debugging
+    console.log('Order items count:', orderObj.items?.length || 0);
+    if (orderObj.items && orderObj.items.length > 0) {
+      console.log('First item:', JSON.stringify(orderObj.items[0], null, 2));
+    }
 
     res.json(orderObj);
   } catch (err) {
@@ -995,11 +1008,12 @@ const adminUpdateOrder = async (req, res) => {
     if (!order) return res.status(404).json({ msg: 'Order not found' });
 
     if (status) {
-      const validStatuses = ['Created', 'Paid', 'Shipped', 'Delivered', 'Cancelled'];
-      if (!validStatuses.includes(status)) {
+      const validStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'];
+      const statusLower = status.toLowerCase();
+      if (!validStatuses.includes(statusLower)) {
         return res.status(400).json({ msg: 'Invalid order status' });
       }
-      order.orderStatus = status;
+      order.status = statusLower;
     }
 
     if (trackingNumber !== undefined) {

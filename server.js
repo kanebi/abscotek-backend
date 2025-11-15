@@ -59,7 +59,8 @@ app.get('/', (req, res) => {
 app.use('/api/users', require('./src/routes/api/users'));
 app.use('/api/auth', require('./src/routes/api/auth'));
 app.use('/api/admin', require('./src/routes/api/adminAuth'));
-app.use('/api/admin', require('./src/routes/api/adminOrders'));
+app.use('/api/admin/orders', require('./src/routes/api/adminOrders'));
+app.use('/api/admin/users', require('./src/routes/api/adminUsers'));
 app.use('/api/web3', require('./src/routes/api/web3Auth'));
 app.use('/api/products', require('./src/routes/api/products'));
 app.use('/api/admin/products', require('./src/routes/api/adminProducts'));
