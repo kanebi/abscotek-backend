@@ -1,8 +1,6 @@
 const path = require('path');
 const fs = require('fs');
 
-const isProduction = process.env.NODE_ENV === 'production';
-
 // Local storage directory
 const LOCAL_DIR = path.resolve(process.cwd(), 'uploads');
 
@@ -23,34 +21,57 @@ async function saveToLocal(filename, buffer, baseUrl) {
   return relative;
 }
 
-// GCP Storage
+// GCP Storage - only initialize if GCP_BUCKET is provided
 let gcs = null;
 let gcsBucket = null;
-if (isProduction) {
+const useGCP = !!process.env.GCP_BUCKET;
+
+if (useGCP) {
   const { Storage } = require('@google-cloud/storage');
   const gcsOptions = {};
-  if (process.env.GCP_PROJECT_ID) gcsOptions.projectId = process.env.GCP_PROJECT_ID;
+  
+  if (process.env.GCP_PROJECT_ID) {
+    gcsOptions.projectId = process.env.GCP_PROJECT_ID;
+  }
+  
   if (process.env.GCP_KEYFILE_JSON) {
     try {
       const creds = JSON.parse(process.env.GCP_KEYFILE_JSON);
       gcsOptions.credentials = creds;
-    } catch (_) {}
+    } catch (err) {
+      console.error('Failed to parse GCP_KEYFILE_JSON:', err.message);
+    }
   } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     // The client will pick credentials from this env var path
   }
-  gcs = new Storage(gcsOptions);
-  const bucketName = process.env.GCP_BUCKET;
-  if (bucketName) {
-    gcsBucket = gcs.bucket(bucketName);
+  
+  try {
+    gcs = new Storage(gcsOptions);
+    gcsBucket = gcs.bucket(process.env.GCP_BUCKET);
+    console.log(`✅ GCP Storage initialized with bucket: ${process.env.GCP_BUCKET}`);
+  } catch (err) {
+    console.error('Failed to initialize GCP Storage:', err.message);
   }
+} else {
+  console.log('📁 Using local file storage (GCP_BUCKET not configured)');
 }
 
 async function saveToGCS(filename, buffer, contentType) {
   if (!gcsBucket) throw new Error('GCP bucket is not configured');
   const file = gcsBucket.file(filename);
-  await file.save(buffer, { contentType, resumable: false, public: true, validation: 'crc32c' });
-  // Make file public (if not using uniform access)
-  try { await file.makePublic(); } catch (_) {}
+  
+  // Save file without trying to set ACLs (uniform bucket-level access)
+  await file.save(buffer, { 
+    contentType, 
+    resumable: false, 
+    validation: 'crc32c',
+    metadata: {
+      cacheControl: 'public, max-age=31536000',
+    }
+  });
+  
+  // With uniform bucket-level access, files are public if bucket is public
+  // No need to call makePublic() - it will fail with uniform access enabled
   const publicUrl = `https://storage.googleapis.com/${gcsBucket.name}/${encodeURIComponent(filename)}`;
   return publicUrl;
 }
@@ -63,15 +84,23 @@ function buildFileName(originalName) {
 
 async function saveImage(originalName, buffer, contentType, baseUrl) {
   const filename = buildFileName(originalName);
-  if (isProduction) {
-    return await saveToGCS(filename, buffer, contentType || 'application/octet-stream');
+  
+  // Use GCP if bucket is configured, otherwise use local storage
+  if (useGCP && gcsBucket) {
+    try {
+      return await saveToGCS(filename, buffer, contentType || 'application/octet-stream');
+    } catch (err) {
+      console.error('Failed to save to GCP, falling back to local storage:', err.message);
+      return await saveToLocal(filename, buffer, baseUrl);
+    }
   }
+  
   return await saveToLocal(filename, buffer, baseUrl);
 }
 
 module.exports = {
   saveImage,
   LOCAL_DIR,
-  isProduction,
+  useGCP,
 };
 
