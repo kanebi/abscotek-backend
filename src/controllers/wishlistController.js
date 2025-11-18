@@ -6,7 +6,7 @@ const Product = require('../models/Product');
 // @access  Private
 const getWishlist = async (req, res) => {
   try {
-    let wishlist = await Wishlist.findOne({ user: req.user.id }).populate('items.product', ['name', 'price', 'images']);
+    let wishlist = await Wishlist.findOne({ user: req.user.id }).populate('items.product', ['name', 'price', 'images', 'stock', 'currency', 'brand', 'category']);
 
     if (!wishlist) {
       wishlist = new Wishlist({ user: req.user.id });
@@ -73,7 +73,7 @@ const removeItemFromWishlist = async (req, res) => {
     );
 
     await wishlist.save();
-    await wishlist.populate('items.product', ['name', 'price', 'images']);
+    await wishlist.populate('items.product', ['name', 'price', 'images', 'stock', 'currency', 'brand', 'category']);
 
     res.json(wishlist);
   } catch (err) {

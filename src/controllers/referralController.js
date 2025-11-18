@@ -1,5 +1,6 @@
 const Referral = require('../models/Referral');
 const User = require('../models/User');
+const Withdrawal = require('../models/Withdrawal');
 const { v4: uuidv4 } = require('uuid');
 
 const REFERRAL_REWARD_AMOUNT = 4; // 4 USDT
@@ -118,6 +119,11 @@ const withdrawBonus = async (req, res) => {
       return res.status(400).json({ errors: [{ msg: 'Wallet address is required' }] });
     }
 
+    // Validate wallet address format
+    if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
+      return res.status(400).json({ errors: [{ msg: 'Invalid wallet address format' }] });
+    }
+
     const user = await User.findById(req.user.id);
 
     if (!user) {
@@ -125,24 +131,62 @@ const withdrawBonus = async (req, res) => {
     }
 
     if (user.balance < amount) {
-      return res.status(400).json({ errors: [{ msg: 'Insufficient balance' }] });
+      return res.status(400).json({ 
+        errors: [{ msg: 'Insufficient balance' }],
+        availableBalance: user.balance,
+        requestedAmount: amount
+      });
     }
+
+    // Check if platform has sufficient balance (this would be checked against actual platform wallet)
+    // For now, we'll assume platform has sufficient balance
+    // In production, you would check the actual platform wallet balance here
+
+    // Create withdrawal record
+    const withdrawal = new Withdrawal({
+      user: req.user.id,
+      amount,
+      walletAddress,
+      status: 'pending',
+      notes: 'Referral bonus withdrawal'
+    });
+
+    await withdrawal.save();
 
     // Deduct amount from user balance
     user.balance -= amount;
     await user.save();
 
     // In a production environment, you would:
-    // 1. Create a withdrawal record
+    // 1. Queue the withdrawal for processing
     // 2. Process the actual blockchain transaction
     // 3. Update withdrawal status based on transaction result
+    // 4. Send notification to user
 
     res.json({
       msg: 'Withdrawal request submitted successfully',
+      withdrawalId: withdrawal._id,
       newBalance: user.balance,
       withdrawalAmount: amount,
-      walletAddress
+      walletAddress,
+      status: withdrawal.status
     });
+  } catch (err) {
+    console.error('Withdrawal error:', err.message);
+    res.status(500).json({ errors: [{ msg: 'Server error' }] });
+  }
+};
+
+// @desc    Get withdrawal history
+// @route   GET /api/referrals/withdrawals
+// @access  Private
+const getWithdrawals = async (req, res) => {
+  try {
+    const withdrawals = await Withdrawal.find({ user: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    res.json(withdrawals);
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ errors: [{ msg: 'Server error' }] });
@@ -154,5 +198,6 @@ module.exports = {
   getReferredUsers,
   getReferralStats,
   withdrawBonus,
+  getWithdrawals,
   awardReferralBonus,
 };

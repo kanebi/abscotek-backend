@@ -33,15 +33,11 @@ const DeliveryAddressSchema = new mongoose.Schema({
   },
   city: {
     type: String,
-    required: true,
-    enum: ['lagos', 'abuja', 'port-harcourt', 'kano'],
-    default: 'lagos'
+    required: true
   },
   state: {
     type: String,
-    required: true,
-    enum: ['lagos', 'fct', 'rivers', 'kano'],
-    default: 'lagos'
+    required: true
   },
   country: {
     type: String,

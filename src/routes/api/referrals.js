@@ -127,4 +127,40 @@ router.get('/stats', auth, require('../../controllers/referralController').getRe
  */
 router.post('/withdraw', auth, require('../../controllers/referralController').withdrawBonus);
 
+/**
+ * @swagger
+ * /api/referrals/withdrawals:
+ *   get:
+ *     summary: Get withdrawal history
+ *     description: Retrieve withdrawal history for the authenticated user.
+ *     tags: [Referrals]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of withdrawals
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   _id:
+ *                     type: string
+ *                   amount:
+ *                     type: number
+ *                   walletAddress:
+ *                     type: string
+ *                   status:
+ *                     type: string
+ *                   createdAt:
+ *                     type: string
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Server error
+ */
+router.get('/withdrawals', auth, require('../../controllers/referralController').getWithdrawals);
+
 module.exports = router;

@@ -13,8 +13,8 @@ const createDeliveryAddress = async (req, res) => {
       areaNumber = '+234',
       phoneNumber,
       streetAddress,
-      city = 'lagos',
-      state = 'lagos',
+      city,
+      state,
       country = 'NG',
       isDefault = false
     } = req.body;
