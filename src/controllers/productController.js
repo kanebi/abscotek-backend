@@ -109,10 +109,21 @@ const getProducts = async (req, res) => {
 
     const filter = { published: true };
 
-    // Category filter - support multiple categories
+    // Category filter - support multiple categories and normalize "phones" to "Smartphones"
     if (category) {
+      const normalizeCategory = (cat) => {
+        const categoryMap = {
+          'phones': 'Smartphones',
+          'phone': 'Smartphones',
+          'Phones': 'Smartphones',
+          'Phone': 'Smartphones'
+        };
+        return categoryMap[cat] || cat;
+      };
+      
       const categories = Array.isArray(category) ? category : category.split(',');
-      filter.category = { $in: categories };
+      const normalizedCategories = categories.map(cat => normalizeCategory(cat));
+      filter.category = { $in: normalizedCategories };
     }
 
     // Brand filter - support multiple brands
