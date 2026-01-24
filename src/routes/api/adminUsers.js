@@ -7,6 +7,7 @@ const {
   updateUser,
   deleteUser,
   createUser,
+  approveUser,
 } = require('../../controllers/adminUserController');
 
 /**
@@ -43,5 +44,12 @@ router.put('/:id', auth.admin, updateUser);
  * @access  Private (admin)
  */
 router.delete('/:id', auth.admin, deleteUser);
+
+/**
+ * @route   PATCH /api/admin/users/:id/approve
+ * @desc    Approve or promote user (admin only)
+ * @access  Private (admin)
+ */
+router.patch('/:id/approve', auth.admin, approveUser);
 
 module.exports = router;

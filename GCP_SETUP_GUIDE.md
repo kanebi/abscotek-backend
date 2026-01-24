@@ -46,3 +46,67 @@ async function saveToGCS(filename, buffer, contentType) {
   
   // Generate a signed URL that expires in 10 years
   const [signedUrl
+ele admin panad from thmage uplo iproduct
+4. Test wser in a brobleaccessi is URLrify the  Vejs`
+3.torage.est-gcp-sckend/tbagain: `node ript a the test sc Run 1 above
+2.using Optionic publhe bucket 
+1. Make t
+eps# Next Sttion
+
+# applica frontend ] Test fromdate)
+- [ up policyucket IAM- needs br 3 errole (40accessibblicly  are pues] Fil- [ ly
+ssfulcead sucloup[x] Files 
+- sible accesand isket exists d
+- [x] Bucurenfigtials coGCP creden- [x] ist
+
+on Checklcatierifi
+
+## V anyway.iblely accesso be public meant tmages are ih**. Productdard approacstanis the ket public ing the bucages, **mak product im withmerce siten e-comch
+For aded Approaommenec
+
+### Ry expirehen therate URLs wneNeed to rege❌ long
+- re very 
+- ❌ URLs amplementomplex to ire cey
+- ❌ Mo account kg serviceginhan by ccessac revoke anxpire
+- ✅ C - URLs e secureMore
+- ✅ RLsd U Using Signe##
+# analytics
+ontrol orss c acceNo
+- ⚠️ e URL know thheyfiles if tess can acc Anyone le
+- ⚠️accessibblicly  be puat shouldct images thfor produ Works well - ✅e and fast
+
+- ✅ Simplublicucket P Bing Mak###s
+
+iderationCons# Security 
+
+#]
+```[filenamebscotek-web/pis.com/age.googlearattps://stocurl -I hurn 200)
+ retld (shoucess ac publicTestge.js
+
+# t-gcp-storand/tes
+node backet upload
+# Tes```bashith:
+
+blic, test wet puing the buckter makg
+
+AfTestin## )
+
+led (enablevel accessucket-iform b* Unl:*cess Contro.com`
+**Acountviceaccgsertek.iam.-web@abscosco* `abcount:*rvice Acek`
+**Sescot** `abt ID:
+**Projecb``abscotek-weame:** Bucket N
+**figuration
+ent ConCurr
+## hing.
+e and cacperformancter  bett forkeur bucnt of yoCDN in froloud tting up Csider se contion,oduc
+For prd)
+commenderoduction Reloud CDN (P Use COption 3:# }
+```
+
+##edUrl;
+return sign
+  
+  
+  });// 10 years1000, 0 * 60 *  * 6 24365 *() + 10 * ate.nowres: D,
+    expiion: 'read'   actgnedUrl({
+ t file.getSi] = awai

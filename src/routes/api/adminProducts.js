@@ -9,6 +9,7 @@ const {
   createProduct,
   getProductsAdmin,
   getUnpublishedProductsAdmin,
+  getProductByIdAdmin,
   updateProduct,
   deleteProduct,
   setPublishStatus,
@@ -21,8 +22,11 @@ const {
 // GET /api/admin/products
 router.get('/', auth.adminOrVendor, getProductsAdmin);
 
-// GET /api/admin/products/unpublished
+// GET /api/admin/products/unpublished (must be before /:id)
 router.get('/unpublished', auth.adminOrVendor, getUnpublishedProductsAdmin);
+
+// GET /api/admin/products/:id
+router.get('/:id', auth.adminOrVendor, getProductByIdAdmin);
 
 // POST /api/admin/products
 router.post(

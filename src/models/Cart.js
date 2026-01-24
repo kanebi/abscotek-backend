@@ -22,6 +22,10 @@ const CartItemSchema = new mongoose.Schema({
     }],
     additionalPrice: { type: Number, default: 0 }
   },
+  specs: [{
+    label: { type: String },
+    value: { type: String }
+  }],
   quantity: {
     type: Number,
     required: true,

@@ -194,7 +194,14 @@ const getCartByUserId = async (req, res) => {
 // @access  Private
 const addItemToCart = async (req, res) => {
   try {
-    const { productId, quantity, currency, variantName } = req.body;
+    let { productId, quantity, currency, variantName, specs } = req.body;
+    
+    // Mutual exclusion: if variant is selected, clear specs; if specs are selected, clear variant
+    if (variantName) {
+      specs = null;
+    } else if (specs && specs.length > 0) {
+      variantName = null;
+    }
 
     let cart = await Cart.findOne({ user: req.user.id });
 
@@ -215,11 +222,15 @@ const addItemToCart = async (req, res) => {
 
     // Find selected variant
     const variant = variantName ? product.variants?.find(v => v.name === variantName) : null;
-    const finalPrice = variant ? product.price + (variant.additionalPrice || 0) : product.price;
+    // Use variant price if available, otherwise use product price
+    const finalPrice = variant?.price || product.price;
+    const finalCurrency = variant?.currency || product.currency || currency || 'USDT';
 
+    // Check for existing item with same product, variant, and specs
     const itemIndex = cart.items.findIndex(
       (item) => item.productId.toString() === productId &&
                 item.variant?.name === variantName &&
+                JSON.stringify(item.specs || []) === JSON.stringify(specs || []) &&
                 item.status === 'active'
     );
 
@@ -231,19 +242,22 @@ const addItemToCart = async (req, res) => {
         product: {
           _id: product._id,
           name: product.name,
-          price: product.price,
+          price: finalPrice,
           image: product.image,
           slug: product.slug,
-          currency: product.currency
+          currency: finalCurrency
         },
         variant: variant ? {
           name: variant.name,
+          price: variant.price,
+          currency: variant.currency,
           attributes: variant.attributes || [],
           additionalPrice: variant.additionalPrice || 0
         } : null,
+        specs: specs || null,
         quantity: quantity || 1,
         unitPrice: finalPrice,
-        currency: currency || product.currency || 'USDT',
+        currency: finalCurrency,
         status: 'active'
       });
     }

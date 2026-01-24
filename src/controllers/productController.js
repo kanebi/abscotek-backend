@@ -253,6 +253,30 @@ const getProductsAdmin = async (req, res) => {
   }
 };
 
+// @desc    Get single product by ID (admin/vendor) - includes unpublished
+// @route   GET /api/admin/products/:id
+// @access  Private (admin|vendor)
+const getProductByIdAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ errors: [{ msg: 'Invalid product ID' }] });
+    }
+
+    const product = await Product.findById(id).lean();
+
+    if (!product) {
+      return res.status(404).json({ errors: [{ msg: 'Product not found' }] });
+    }
+
+    return res.json(product);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ errors: [{ msg: 'Server error' }] });
+  }
+};
+
 // @desc    Get unpublished products (admin/vendor)
 // @route   GET /api/admin/products/unpublished
 // @access  Private
@@ -574,6 +598,7 @@ module.exports = {
   getProductsAdmin,
   getUnpublishedProductsAdmin,
   getProductById,
+  getProductByIdAdmin,
   updateProduct,
   deleteProduct,
   getRelatedProducts,

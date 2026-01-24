@@ -8,6 +8,7 @@ const { awardReferralBonus } = require('./referralController');
 const User = require('../models/User');
 const PaystackService = require('../services/paystackService');
 const Paystack = require('paystack-api')(process.env.PAYSTACK_SECRET_KEY);
+const { reduceStockOnOrder } = require('../utils/stockAnalysis');
 
 // @desc    Create an order (direct)
 // @route   POST /api/orders
@@ -1063,6 +1064,8 @@ const adminUpdateOrder = async (req, res) => {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ msg: 'Order not found' });
 
+    const previousStatus = order.status;
+    
     if (status) {
       const validStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'];
       const statusLower = status.toLowerCase();
@@ -1070,6 +1073,26 @@ const adminUpdateOrder = async (req, res) => {
         return res.status(400).json({ msg: 'Invalid order status' });
       }
       order.status = statusLower;
+      
+      // Reduce stock when order is marked as delivered
+      if (statusLower === 'delivered' && previousStatus !== 'delivered') {
+        try {
+          // Populate order items to get product and variant info
+          await order.populate({
+            path: 'items',
+            select: 'product variant quantity'
+          });
+          
+          // Reduce stock for each item
+          for (const item of order.items) {
+            const variantId = item.variant?.variantId || item.variant?.name || null;
+            await reduceStockOnOrder(item.product, variantId, item.quantity);
+          }
+        } catch (stockError) {
+          console.error('Error reducing stock on order delivery:', stockError);
+          // Don't fail the order update if stock reduction fails, just log it
+        }
+      }
     }
 
     if (trackingNumber !== undefined) {
@@ -1244,7 +1267,8 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
       const orderItem = new OrderItem({
         order: order._id,
         product: cartItem.product._id,
-        // variant: cartItem.variant || null, // Include variant data from cart
+        variant: cartItem.variant || null, // Include variant data from cart
+        specs: cartItem.specs || null, // Include specs from cart
         quantity: cartItem.quantity,
         unitPrice: cartItem.unitPrice || cartItem.product.price,
         totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
@@ -1770,6 +1794,8 @@ const processUSDTWalletPayment = async (req, res) => {
       const orderItem = new OrderItem({
         order: order._id,
         product: cartItem.product._id,
+        variant: cartItem.variant || null, // Include variant data from cart
+        specs: cartItem.specs || null, // Include specs from cart
         quantity: cartItem.quantity,
         unitPrice: cartItem.unitPrice || cartItem.product.price,
         totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
@@ -1803,6 +1829,18 @@ const processUSDTWalletPayment = async (req, res) => {
     // Update order with payment reference
     order.payments = [payment._id];
     await order.save();
+
+    // Reduce stock when order is created with completed payment
+    // Stock is reduced immediately when payment is completed
+    try {
+      for (const cartItem of activeItems) {
+        const variantId = cartItem.variantName || cartItem.variant?.name || null;
+        await reduceStockOnOrder(cartItem.product._id, variantId, cartItem.quantity);
+      }
+    } catch (stockError) {
+      console.error('Error reducing stock on order creation:', stockError);
+      // Don't fail the order if stock reduction fails, just log it
+    }
 
     // Mark cart items as ordered
     cart.items = cart.items.map(item => {

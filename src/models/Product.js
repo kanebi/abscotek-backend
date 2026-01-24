@@ -141,10 +141,13 @@ ProductSchema.pre('validate', async function (next) {
       this.slug = candidate;
     }
 
-    // Derive outOfStock from stock or variants
+    // Derive outOfStock from stock or variants automatically
     if (this.variants && this.variants.length > 0) {
+      // Calculate total stock from all variants
       this.stock = this.variants.reduce((total, variant) => total + (variant.stock || 0), 0);
     }
+    // Automatically set outOfStock based on stock quantity
+    // If stock > 0, product is in stock; if stock <= 0, product is out of stock
     this.outOfStock = (this.stock ?? 0) <= 0;
     next();
   } catch (err) {

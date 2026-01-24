@@ -135,7 +135,7 @@ const createUser = async (req, res) => {
  */
 const updateUser = async (req, res) => {
   try {
-    const { name, email, role, phone, companyName, isVerified, password } = req.body;
+    const { name, email, role, phone, companyName, isVerified, approved, password } = req.body;
     
     const user = await User.findById(req.params.id);
     
@@ -160,6 +160,7 @@ const updateUser = async (req, res) => {
     if (phone !== undefined) user.phone = phone || null;
     if (companyName !== undefined) user.companyName = companyName || null;
     if (typeof isVerified === 'boolean') user.isVerified = isVerified;
+    if (typeof approved === 'boolean') user.approved = approved;
     
     // Update password if provided
     if (password) {
@@ -181,6 +182,52 @@ const updateUser = async (req, res) => {
     return res.json(userResponse);
   } catch (err) {
     console.error('Error updating user:', err);
+    if (err.kind === 'ObjectId') {
+      return res.status(404).json({ errors: [{ msg: 'User not found' }] });
+    }
+    return res.status(500).json({ errors: [{ msg: 'Server error' }] });
+  }
+};
+
+/**
+ * @desc    Approve or promote user
+ * @route   PATCH /api/admin/users/:id/approve
+ * @access  Private (admin)
+ */
+const approveUser = async (req, res) => {
+  try {
+    const { approved, role } = req.body;
+    
+    const user = await User.findById(req.params.id);
+    
+    if (!user) {
+      return res.status(404).json({ errors: [{ msg: 'User not found' }] });
+    }
+    
+    // Prevent admin from changing their own role
+    if (req.params.id === req.user.id && role && role !== user.role) {
+      return res.status(400).json({ 
+        errors: [{ msg: 'You cannot change your own role' }] 
+      });
+    }
+    
+    if (typeof approved === 'boolean') {
+      user.approved = approved;
+    }
+    
+    if (role && ['user', 'vendor', 'admin'].includes(role)) {
+      user.role = role;
+    }
+    
+    await user.save();
+    
+    // Return user without password
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    
+    return res.json(userResponse);
+  } catch (err) {
+    console.error('Error approving user:', err);
     if (err.kind === 'ObjectId') {
       return res.status(404).json({ errors: [{ msg: 'User not found' }] });
     }
@@ -224,4 +271,5 @@ module.exports = {
   createUser,
   updateUser,
   deleteUser,
+  approveUser,
 };
