@@ -13,6 +13,7 @@ const jwt = require('jsonwebtoken');
 const jwtSecret = process.env.JWT_SECRET || 'supersecretjwttoken';
 const auth = require('../../middleware/auth');
 const User = require('../../models/User');
+const { Order } = require('../../models/Order');
 
 // @desc    Register user
 // @route   POST api/users
@@ -105,14 +106,13 @@ router.get('/profile', auth, async (req, res) => {
 // @access  Private
 router.get('/profile/stats', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('balance');
+    const user = await User.findById(req.user.id).select('balance preferences');
     if (!user) {
       return res.status(404).json({ msg: 'User not found' });
     }
 
     // Get order count from orders collection
-    const Order = require('../../models/Order');
-    const orderCount = await Order.countDocuments({ user: req.user.id });
+    const orderCount = await Order.countDocuments({ buyer: req.user.id });
 
     // Get referral stats
     const totalReferrals = await User.countDocuments({ referredBy: req.user.id });
@@ -124,8 +124,12 @@ router.get('/profile/stats', auth, async (req, res) => {
       currency: user.preferences?.currency || 'USDT'
     });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    console.error('Error in /profile/stats:', err);
+    console.error('Error stack:', err.stack);
+    res.status(500).json({ 
+      msg: 'Server Error',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 

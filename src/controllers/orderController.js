@@ -1264,11 +1264,21 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
     // Create order items with order reference
     const orderItems = [];
     for (const cartItem of activeItems) {
-      const orderItem = new OrderItem({
+      // Build variant object only if variant exists
+      let variantData = undefined;
+      if (cartItem.variant && typeof cartItem.variant === 'object') {
+        variantData = {
+          variantId: cartItem.variant._id || cartItem.variant.variantId || null,
+          name: cartItem.variant.name || null,
+          attributes: cartItem.variant.attributes || [],
+          additionalPrice: cartItem.variant.additionalPrice || cartItem.variant.price || 0
+        };
+      }
+
+      const orderItemData = {
         order: order._id,
         product: cartItem.product._id,
-        variant: cartItem.variant || null, // Include variant data from cart
-        specs: cartItem.specs || null, // Include specs from cart
+        specs: cartItem.specs && Array.isArray(cartItem.specs) ? cartItem.specs : [],
         quantity: cartItem.quantity,
         unitPrice: cartItem.unitPrice || cartItem.product.price,
         totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
@@ -1277,7 +1287,14 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
         // Include product image data directly
         productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
         productName: cartItem.product.name
-      });
+      };
+
+      // Only include variant if it exists
+      if (variantData) {
+        orderItemData.variant = variantData;
+      }
+
+      const orderItem = new OrderItem(orderItemData);
       await orderItem.save({ session });
       orderItems.push(orderItem._id);
     }
