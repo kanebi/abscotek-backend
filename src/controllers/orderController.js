@@ -1065,7 +1065,7 @@ const adminUpdateOrder = async (req, res) => {
     if (!order) return res.status(404).json({ msg: 'Order not found' });
 
     const previousStatus = order.status;
-    
+
     if (status) {
       const validStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'];
       const statusLower = status.toLowerCase();
