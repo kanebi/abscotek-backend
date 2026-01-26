@@ -6,7 +6,7 @@ const Product = require('../models/Product');
 // @access  Private
 const updateItemQuantity = async (req, res) => {
   try {
-    const { productId, quantity } = req.body;
+    const { productId, quantity, variantName, specs } = req.body;
 
     if (!productId || typeof quantity !== 'number' || quantity < 1) {
       return res.status(400).json({ msg: 'productId and positive quantity are required' });
@@ -17,8 +17,12 @@ const updateItemQuantity = async (req, res) => {
       return res.status(404).json({ msg: 'Cart not found' });
     }
 
+    // Match item by productId, variant, and specs for precise identification
     const itemIndex = cart.items.findIndex(
-      (item) => item.productId.toString() === productId && item.status === 'active'
+      (item) => item.productId.toString() === productId &&
+                item.variant?.name === variantName &&
+                JSON.stringify(item.specs || []) === JSON.stringify(specs || []) &&
+                item.status === 'active'
     );
 
     if (itemIndex === -1) {
@@ -43,7 +47,7 @@ const updateItemQuantity = async (req, res) => {
           ...item.toObject(),
           image: item.product?.image || item.image, // Use image from product or fallback to existing image
           name: item.product?.name || item.name,
-          price: item.product?.price || item.price || item.unitPrice
+          price: item.unitPrice || item.product?.price || item.price
         }));
     }
 
@@ -79,12 +83,16 @@ const getCart = async (req, res) => {
             firstImage: fullProduct?.firstImage
           });
 
+          // Use unitPrice as the primary price (includes variant price if variant is selected)
+          // This ensures the product.price reflects the actual price for this cart item
+          const itemPrice = item.unitPrice || fullProduct?.price || item.product?.price || item.price;
+          
           const processedItem = {
             ...item.toObject(),
             product: {
               _id: fullProduct?._id || item.productId,
               name: fullProduct?.name || item.product?.name || item.name || 'Product',
-              price: fullProduct?.price || item.product?.price || item.price || item.unitPrice,
+              price: itemPrice, // Use unitPrice (includes variant) as product price
               images: fullProduct?.images || item.product?.images || [],
               firstImage: fullProduct?.firstImage || item.product?.firstImage
             },
@@ -92,7 +100,7 @@ const getCart = async (req, res) => {
             image: fullProduct?.images?.[0] || fullProduct?.firstImage || item.product?.images?.[0] || item.image,
             images: fullProduct?.images || item.product?.images || [item.image],
             name: fullProduct?.name || item.product?.name || item.name,
-            price: fullProduct?.price || item.product?.price || item.price || item.unitPrice
+            price: itemPrice // Use unitPrice (includes variant) as item price
           };
 
           console.log('Backend - Processed cart item:', {
@@ -173,7 +181,7 @@ const getCartByUserId = async (req, res) => {
             image: item.product?.images?.[0] || item.product?.firstImage || item.image,
             images: item.product?.images || [item.image],
             name: item.product?.name || item.name,
-            price: item.product?.price || item.price || item.unitPrice
+            price: item.unitPrice || item.product?.price || item.price
           };
         }));
 
@@ -235,7 +243,12 @@ const addItemToCart = async (req, res) => {
     );
 
     if (itemIndex > -1) {
+      // Update existing item quantity
       cart.items[itemIndex].quantity += quantity || 1;
+      // Ensure quantity doesn't go below 1
+      if (cart.items[itemIndex].quantity < 1) {
+        cart.items[itemIndex].quantity = 1;
+      }
     } else {
       cart.items.push({
         productId: productId,
@@ -291,12 +304,16 @@ const addItemToCart = async (req, res) => {
             firstImage: fullProduct?.firstImage
           });
 
+          // Use unitPrice as the primary price (includes variant price if variant is selected)
+          // This ensures the product.price reflects the actual price for this cart item
+          const itemPrice = item.unitPrice || fullProduct?.price || item.product?.price || item.price;
+          
           const processedItem = {
             ...item.toObject(),
             product: {
               _id: fullProduct?._id || item.productId,
               name: fullProduct?.name || item.product?.name || item.name || 'Product',
-              price: fullProduct?.price || item.product?.price || item.price || item.unitPrice,
+              price: itemPrice, // Use unitPrice (includes variant) as product price
               images: fullProduct?.images || item.product?.images || [],
               firstImage: fullProduct?.firstImage || item.product?.firstImage
             },
@@ -304,7 +321,7 @@ const addItemToCart = async (req, res) => {
             image: fullProduct?.images?.[0] || fullProduct?.firstImage || item.product?.images?.[0] || item.image,
             images: fullProduct?.images || item.product?.images || [item.image],
             name: fullProduct?.name || item.product?.name || item.name,
-            price: fullProduct?.price || item.product?.price || item.price || item.unitPrice
+            price: itemPrice // Use unitPrice (includes variant) as item price
           };
 
           console.log('Backend - Add to cart - Processed cart item:', {
@@ -363,7 +380,7 @@ const removeItemFromCart = async (req, res) => {
           image: item.product?.images?.[0] || item.image, // Use first image from product images array
           images: item.product?.images || [item.image], // Include full images array
           name: item.product?.name || item.name,
-          price: item.product?.price || item.price || item.unitPrice
+          price: item.unitPrice || item.product?.price || item.price
         }));
     }
 

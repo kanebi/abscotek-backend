@@ -166,6 +166,41 @@ const OrderSchema = new mongoose.Schema({
   },
   actualDeliveryDate: {
     type: Date
+  },
+  // Crypto payment fields
+  paymentMethod: {
+    type: String,
+    enum: ['wallet', 'paystack', 'crypto', 'card'],
+    default: 'wallet'
+  },
+  paymentAddress: {
+    type: String,
+    sparse: true,
+    default: null
+  },
+  paymentExpiry: {
+    type: Date,
+    sparse: true,
+    default: null
+  },
+  paymentTransactionHash: {
+    type: String,
+    sparse: true,
+    default: null
+  },
+  paymentNetwork: {
+    type: String,
+    enum: ['ethereum', 'polygon', 'bsc'],
+    sparse: true,
+    default: null
+  },
+  paymentConfirmations: {
+    type: Number,
+    default: 0
+  },
+  requiredConfirmations: {
+    type: Number,
+    default: 3
   }
 }, {
   timestamps: true

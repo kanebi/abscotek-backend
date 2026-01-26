@@ -33,6 +33,9 @@ ensureIndexes().catch(() => {});
 app.use(express.json({ extended: false }));
 app.use(cors());
 
+// Note: Webhook routes handle their own body parsing with signature verification
+// See backend/src/routes/api/webhooks.js for details
+
 // Serve local uploads in non-production
 if (process.env.NODE_ENV !== 'production') {
   app.use('/uploads', express.static(LOCAL_DIR));
@@ -70,12 +73,18 @@ app.use('/api/wishlist', require('./src/routes/api/wishlist'));
 app.use('/api/delivery-methods', require('./src/routes/api/delivery-methods'));
 app.use('/api/delivery-addresses', require('./src/routes/api/delivery-addresses'));
 app.use('/api/referrals', require('./src/routes/api/referrals'));
+app.use('/api/webhooks', require('./src/routes/api/webhooks'));
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Error logging middleware (should be last)
 app.use(errorLogger);
 
 const PORT = process.env.PORT || 5832;
+
+// Start payment verification job for crypto payments
+const paymentVerificationJob = require('./src/jobs/paymentVerificationJob');
+paymentVerificationJob.start();
+console.log('✅ Payment verification job started');
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);

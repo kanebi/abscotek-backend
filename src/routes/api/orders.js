@@ -14,6 +14,8 @@ const {
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
   processUSDTWalletPayment,
+  createCryptoPaymentOrder,
+  checkCryptoPaymentStatus,
 } = require('../../controllers/orderController');
 
 /**
@@ -374,6 +376,8 @@ router.get('/by-number/:orderNumber', auth, getOrderByNumber);
 router.get('/by-reference/:reference', auth, getOrderByPaystackReference);
 router.post('/verify-payment', auth, verifyPaymentAndCreateOrder);
 router.post('/usdt-payment', auth, processUSDTWalletPayment);
+router.post('/create-crypto-payment', auth, createCryptoPaymentOrder);
+router.get('/:orderId/crypto-payment-status', auth, checkCryptoPaymentStatus);
 
 /**
  * @swagger

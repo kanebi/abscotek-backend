@@ -564,14 +564,30 @@ const getOrders = async (req, res) => {
         total: orderObj.calculatedTotal || orderObj.totalAmount
       };
 
-      // Flatten product data for frontend compatibility
+      // Ensure all items have unitPrice and process items for frontend
       if (orderObj.items && orderObj.items.length > 0) {
+        // Process all items to ensure unitPrice is available and product.price reflects unitPrice
+        orderObj.items = orderObj.items.map(item => {
+          const itemObj = item.toObject ? item.toObject() : item;
+          // Ensure unitPrice is set (it should be from OrderItem schema)
+          if (!itemObj.unitPrice && itemObj.price) {
+            itemObj.unitPrice = itemObj.price;
+          }
+          // Ensure product.price reflects unitPrice if variant is selected (for frontend compatibility)
+          if (itemObj.product && itemObj.unitPrice) {
+            itemObj.product.price = itemObj.unitPrice;
+          }
+          return itemObj;
+        });
+        
+        // Flatten product data for frontend compatibility (first item for legacy support)
         const firstItem = orderObj.items[0];
         orderObj.product = {
           name: firstItem.productName || firstItem.product?.name || 'Product',
           variant: firstItem.variant?.name || '',
           quantity: firstItem.quantity,
-          price: firstItem.unitPrice,
+          price: firstItem.unitPrice || firstItem.price,
+          unitPrice: firstItem.unitPrice || firstItem.price,
           images: firstItem.product?.images || []
         };
       }
@@ -718,14 +734,30 @@ const getOrderById = async (req, res) => {
       total: orderObj.calculatedTotal || orderObj.totalAmount
     };
 
-    // Flatten product data for frontend compatibility
+    // Ensure all items have unitPrice and process items for frontend
     if (orderObj.items && orderObj.items.length > 0) {
+      // Process all items to ensure unitPrice is available and product.price reflects unitPrice
+      orderObj.items = orderObj.items.map(item => {
+        const itemObj = item.toObject ? item.toObject() : item;
+        // Ensure unitPrice is set (it should be from OrderItem schema)
+        if (!itemObj.unitPrice && itemObj.price) {
+          itemObj.unitPrice = itemObj.price;
+        }
+        // Ensure product.price reflects unitPrice if variant is selected (for frontend compatibility)
+        if (itemObj.product && itemObj.unitPrice) {
+          itemObj.product.price = itemObj.unitPrice;
+        }
+        return itemObj;
+      });
+      
+      // Flatten product data for frontend compatibility (first item for legacy support)
       const firstItem = orderObj.items[0];
       orderObj.product = {
         name: firstItem.productName || firstItem.product?.name || 'Product',
         variant: firstItem.variant?.name || '',
         quantity: firstItem.quantity,
-        price: firstItem.unitPrice,
+        price: firstItem.unitPrice || firstItem.price,
+        unitPrice: firstItem.unitPrice || firstItem.price,
         images: firstItem.product?.images || []
       };
     }
@@ -1906,6 +1938,362 @@ const processUSDTWalletPayment = async (req, res) => {
   }
 };
 
+// @desc    Create order with crypto payment (blockchain)
+// @route   POST /api/orders/create-crypto-payment
+// @access  Private
+const createCryptoPaymentOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  let transactionCommitted = false;
+
+  try {
+    const {
+      deliveryMethodId,
+      shippingAddressId,
+      currency = 'USDT',
+      orderCurrency, // Native currency for order calculations (USD for non-NGN, NGN for NGN)
+      notes = '',
+      network = 'ethereum' // ethereum, polygon, bsc
+    } = req.body;
+
+    // Get user's cart
+    let cart = await Cart.findOne({ user: req.user.id })
+      .populate('items.product', ['price', 'images', 'currency', 'name', 'stock'])
+      .session(session);
+    
+    if (!cart || cart.items.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'Cart is empty' });
+    }
+
+    // Filter out ordered items - only process active items
+    const activeItems = cart.items.filter(item => item.status !== 'ordered');
+    if (activeItems.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'No active items in cart' });
+    }
+
+    // Determine order currency: use native currency (USD) for non-NGN payments
+    // For NGN payments, use NGN (which may be converted by currency provider)
+    const orderCalcCurrency = orderCurrency || (currency !== 'NGN' ? 'USD' : 'NGN');
+    
+    // Calculate totals in order currency (USD for non-NGN, NGN for NGN)
+    let subTotal = 0;
+    for (const item of activeItems) {
+      let itemPrice = item.product.price;
+      const productCurrency = item.product.currency || 'USD';
+      
+      // Convert product price to order currency if needed
+      if (productCurrency !== orderCalcCurrency) {
+        // Convert from product currency to order currency
+        if (productCurrency === 'NGN' && orderCalcCurrency === 'USD') {
+          itemPrice = item.product.price / 1500; // NGN to USD
+        } else if (productCurrency === 'USD' && orderCalcCurrency === 'NGN') {
+          itemPrice = item.product.price * 1500; // USD to NGN
+        } else if (productCurrency === 'USDT' && orderCalcCurrency === 'USD') {
+          itemPrice = item.product.price; // USDT = USD (1:1)
+        } else if (productCurrency === 'USD' && orderCalcCurrency === 'USDT') {
+          itemPrice = item.product.price; // USD = USDT (1:1)
+        }
+        // Add more conversions as needed
+      }
+      subTotal += itemPrice * item.quantity;
+    }
+
+    // Get delivery method
+    const deliveryMethod = await DeliveryMethod.findById(deliveryMethodId).session(session);
+    if (!deliveryMethod) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'Invalid delivery method' });
+    }
+
+    // Convert delivery cost to order currency if needed
+    let deliveryCost = deliveryMethod.price;
+    const deliveryCurrency = deliveryMethod.currency || 'NGN';
+    if (deliveryCurrency !== orderCalcCurrency) {
+      if (deliveryCurrency === 'NGN' && orderCalcCurrency === 'USD') {
+        deliveryCost = deliveryMethod.price / 1500; // NGN to USD
+      } else if (deliveryCurrency === 'USD' && orderCalcCurrency === 'NGN') {
+        deliveryCost = deliveryMethod.price * 1500; // USD to NGN
+      }
+    }
+
+    // Total in order currency (USD for non-NGN, NGN for NGN)
+    const totalAmountInOrderCurrency = subTotal + deliveryCost;
+    
+    // Convert total from order currency to payment currency if different
+    let totalAmount = totalAmountInOrderCurrency;
+    if (orderCalcCurrency !== currency) {
+      if (orderCalcCurrency === 'USD' && currency === 'USDT') {
+        totalAmount = totalAmountInOrderCurrency; // USD = USDT (1:1)
+      } else if (orderCalcCurrency === 'USD' && currency === 'NGN') {
+        totalAmount = totalAmountInOrderCurrency * 1500; // USD to NGN
+      } else if (orderCalcCurrency === 'NGN' && currency === 'USD') {
+        totalAmount = totalAmountInOrderCurrency / 1500; // NGN to USD
+      } else if (orderCalcCurrency === 'NGN' && currency === 'USDT') {
+        totalAmount = totalAmountInOrderCurrency / 1500; // NGN to USDT
+      }
+      // Add more conversions as needed
+    }
+
+    // Validate shipping address if provided
+    if (shippingAddressId) {
+      const DeliveryAddress = require('../models/DeliveryAddress');
+      const shippingAddress = await DeliveryAddress.findById(shippingAddressId).session(session);
+      if (!shippingAddress) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'Invalid shipping address' });
+      }
+    }
+
+    // Create order with pending payment status
+    // Store order values in order currency (USD for non-NGN, NGN for NGN)
+    // But totalAmount should be in payment currency
+    const order = new Order({
+      buyer: req.user.id,
+      shippingAddress: shippingAddressId || null,
+      deliveryMethod: deliveryMethodId,
+      subTotal: subTotal, // In order currency (USD for non-NGN)
+      deliveryFee: deliveryCost, // In order currency (USD for non-NGN)
+      totalAmount: totalAmount, // In payment currency (what user pays)
+      currency: currency, // Payment currency
+      status: 'pending',
+      paymentStatus: 'unpaid',
+      paymentMethod: 'crypto',
+      paymentNetwork: network,
+      notes,
+      requiredConfirmations: 3
+    });
+
+    await order.save({ session });
+
+    // Generate payment address for this order
+    const blockchainPaymentService = require('../services/blockchainPaymentService');
+    const paymentAddress = blockchainPaymentService.generatePaymentAddress(order._id.toString());
+    
+    // Set payment address and expiry (30 minutes)
+    order.paymentAddress = paymentAddress;
+    order.paymentExpiry = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+    await order.save({ session });
+
+    // Create order items
+    const orderItems = [];
+    for (const cartItem of activeItems) {
+      let variantData = undefined;
+      if (cartItem.variant && typeof cartItem.variant === 'object') {
+        variantData = {
+          variantId: cartItem.variant._id || cartItem.variant.variantId || null,
+          name: cartItem.variant.name || null,
+          attributes: cartItem.variant.attributes || [],
+          additionalPrice: cartItem.variant.additionalPrice || cartItem.variant.price || 0
+        };
+      }
+
+      const orderItemData = {
+        order: order._id,
+        product: cartItem.product._id,
+        specs: cartItem.specs && Array.isArray(cartItem.specs) ? cartItem.specs : [],
+        quantity: cartItem.quantity,
+        unitPrice: cartItem.unitPrice || cartItem.product.price,
+        totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
+        currency: cartItem.currency || currency,
+        status: 'ordered',
+        productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
+        productName: cartItem.product.name
+      };
+
+      if (variantData) {
+        orderItemData.variant = variantData;
+      }
+
+      const orderItem = new OrderItem(orderItemData);
+      await orderItem.save({ session });
+      orderItems.push(orderItem._id);
+    }
+
+    // Update order with items
+    order.items = orderItems;
+    await order.save({ session });
+
+    // Start monitoring for payment
+    const transactionMonitor = require('../services/transactionMonitor');
+    transactionMonitor.startMonitoring(
+      order._id.toString(),
+      paymentAddress,
+      totalAmount,
+      async (orderId, address, amount, txHash) => {
+        // Payment received callback
+        try {
+          const confirmedOrder = await Order.findById(orderId);
+          if (confirmedOrder && confirmedOrder.paymentStatus === 'unpaid') {
+            confirmedOrder.paymentStatus = 'paid';
+            confirmedOrder.status = 'confirmed';
+            confirmedOrder.paymentTransactionHash = txHash || null;
+            confirmedOrder.paymentConfirmations = 3;
+            await confirmedOrder.save();
+
+            // Create payment record
+            const payment = new Payment({
+              order: confirmedOrder._id,
+              user: confirmedOrder.buyer,
+              amount: confirmedOrder.totalAmount,
+              currency: confirmedOrder.currency,
+              method: 'crypto',
+              status: 'completed',
+              paymentDate: new Date(),
+              transactionHash: txHash
+            });
+            await payment.save();
+
+            // Mark cart items as ordered
+            const userCart = await Cart.findOne({ user: confirmedOrder.buyer });
+            if (userCart) {
+              userCart.items = userCart.items.map(item => {
+                const itemObj = item.toObject();
+                if (activeItems.some(activeItem => activeItem.productId.toString() === item.productId.toString())) {
+                  itemObj.status = 'ordered';
+                }
+                return itemObj;
+              });
+              await userCart.save();
+            }
+
+            // Award referral bonus
+            const buyer = await User.findById(confirmedOrder.buyer);
+            if (buyer && buyer.referredBy) {
+              await awardReferralBonus(buyer._id, confirmedOrder.totalAmount);
+            }
+
+            // Reduce stock
+            await reduceStockOnOrder(confirmedOrder);
+          }
+        } catch (error) {
+          console.error('Error processing payment callback:', error);
+        }
+      }
+    );
+
+    await session.commitTransaction();
+    transactionCommitted = true;
+
+    // Generate QR code data
+    const QRCode = require('qrcode');
+    let qrCodeDataUrl = null;
+    try {
+      // Create payment URI (ethereum:address?value=amount)
+      const paymentURI = `${network === 'ethereum' ? 'ethereum' : network}:${paymentAddress}?value=${totalAmount}`;
+      qrCodeDataUrl = await QRCode.toDataURL(paymentURI);
+    } catch (error) {
+      console.error('Error generating QR code:', error);
+    }
+
+    return res.json({
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      paymentAddress,
+      amount: totalAmount,
+      currency,
+      network,
+      qrCode: qrCodeDataUrl,
+      expiry: order.paymentExpiry,
+      message: 'Order created. Please send payment to the provided address.'
+    });
+
+  } catch (error) {
+    if (!transactionCommitted) {
+      await session.abortTransaction();
+    }
+    console.error('Error creating crypto payment order:', error);
+    res.status(500).json({ msg: 'Error creating payment order', error: error.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+// @desc    Check crypto payment status
+// @route   GET /api/orders/:orderId/crypto-payment-status
+// @access  Private
+const checkCryptoPaymentStatus = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    // Verify user owns this order
+    if (order.buyer.toString() !== req.user.id) {
+      return res.status(403).json({ msg: 'Unauthorized' });
+    }
+
+    // Check if payment address exists
+    if (!order.paymentAddress) {
+      return res.status(400).json({ msg: 'No payment address for this order' });
+    }
+
+    // Check payment status
+    if (order.paymentStatus === 'paid') {
+      return res.json({
+        status: 'paid',
+        paymentStatus: order.paymentStatus,
+        orderStatus: order.status,
+        transactionHash: order.paymentTransactionHash,
+        confirmations: order.paymentConfirmations
+      });
+    }
+
+    // Check if payment received
+    const blockchainPaymentService = require('../services/blockchainPaymentService');
+    const paymentReceived = await blockchainPaymentService.checkPaymentReceived(
+      order.paymentAddress,
+      order.totalAmount
+    );
+
+    if (paymentReceived) {
+      // Get transaction hash if available
+      const transactionMonitor = require('../services/transactionMonitor');
+      const confirmations = await blockchainPaymentService.getConfirmations(
+        order.paymentTransactionHash || ''
+      );
+
+      return res.json({
+        status: 'pending_confirmation',
+        paymentReceived: true,
+        confirmations,
+        requiredConfirmations: order.requiredConfirmations || 3,
+        paymentAddress: order.paymentAddress,
+        expectedAmount: order.totalAmount,
+        currency: order.currency
+      });
+    }
+
+    // Check if expired
+    if (order.paymentExpiry && new Date() > order.paymentExpiry) {
+      return res.json({
+        status: 'expired',
+        paymentReceived: false,
+        paymentAddress: order.paymentAddress,
+        expectedAmount: order.totalAmount,
+        currency: order.currency
+      });
+    }
+
+    return res.json({
+      status: 'waiting',
+      paymentReceived: false,
+      paymentAddress: order.paymentAddress,
+      expectedAmount: order.totalAmount,
+      currency: order.currency,
+      expiry: order.paymentExpiry
+    });
+
+  } catch (error) {
+    console.error('Error checking payment status:', error);
+    res.status(500).json({ msg: 'Error checking payment status', error: error.message });
+  }
+};
+
 module.exports = {
   createOrder,
   checkoutFromCart,
@@ -1917,6 +2305,8 @@ module.exports = {
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
   processUSDTWalletPayment,
+  createCryptoPaymentOrder,
+  checkCryptoPaymentStatus,
   updateOrderStatus,
   cancelOrder,
   adminListOrders,
