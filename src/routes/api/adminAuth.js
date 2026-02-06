@@ -95,6 +95,7 @@ router.post(
         password,
         companyName,
         phone,
+        role:'user',
         isVerified: true, // Admin users are automatically verified
       });
 
