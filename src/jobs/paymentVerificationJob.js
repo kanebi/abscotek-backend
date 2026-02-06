@@ -95,6 +95,23 @@ const paymentVerificationJob = cron.schedule('* * * * *', async () => {
             // Reduce stock
             await reduceStockOnOrder(order);
 
+            // Pay from wallet: transfer to platform wallet (user-tied uses buyerId)
+            try {
+              const buyer = await User.findById(order.buyer._id || order.buyer).select('cryptoPaymentAddress');
+              const isUserTied = buyer?.cryptoPaymentAddress && buyer.cryptoPaymentAddress === order.paymentAddress;
+              const sweepOptions = isUserTied ? { buyerId: (order.buyer._id || order.buyer).toString() } : {};
+              const payResult = await blockchainPaymentService.payFromWallet(order._id.toString(), order.currency, sweepOptions);
+              if (payResult.success) {
+                order.fundsSwept = true;
+                order.fundsSweptAt = new Date();
+                order.fundsSweptTxHash = payResult.transactionHash;
+                await order.save();
+                console.log(`Order ${order._id} funds swept to platform wallet`);
+              }
+            } catch (sweepErr) {
+              console.error(`Order ${order._id} payFromWallet error (sweeper will retry):`, sweepErr.message);
+            }
+
             // Stop monitoring this order
             transactionMonitor.stopMonitoring(order._id.toString());
 

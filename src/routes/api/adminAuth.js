@@ -46,9 +46,6 @@ const User = require('../../models/User');
  *                 type: string
  *               phone:
  *                 type: string
- *               role:
- *                 type: string
- *                 default: admin
  *     responses:
  *       200:
  *         description: Admin user created successfully
@@ -81,7 +78,7 @@ router.post(
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { name, email, password, companyName, phone, role = 'admin' } = req.body;
+    const { name, email, password, companyName, phone } = req.body;
 
     try {
       // Check if user already exists
@@ -91,14 +88,13 @@ router.post(
         return res.status(400).json({ errors: [{ msg: 'User already exists' }] });
       }
 
-      // Create new admin user
+      // Create new admin user - NEVER accept role from request body, always set admin
       user = new User({
         name,
         email: email.toLowerCase(),
         password,
         companyName,
         phone,
-        role,
         isVerified: true, // Admin users are automatically verified
       });
 
@@ -117,6 +113,7 @@ router.post(
           role: user.role,
           companyName: user.companyName,
           phone: user.phone,
+          walletAddress: user.walletAddress,
         },
       };
 
@@ -135,6 +132,7 @@ router.post(
               role: user.role,
               companyName: user.companyName,
               phone: user.phone,
+              walletAddress: user.walletAddress,
             },
             message: 'Admin user created successfully'
           });
@@ -236,6 +234,7 @@ router.post(
           role: user.role,
           companyName: user.companyName,
           phone: user.phone,
+          walletAddress: user.walletAddress,
         },
       };
 
@@ -254,6 +253,7 @@ router.post(
               role: user.role,
               companyName: user.companyName,
               phone: user.phone,
+              walletAddress: user.walletAddress,
             },
             message: 'Admin login successful'
           });
@@ -289,7 +289,7 @@ router.post(
  */
 router.get('/profile', auth.admin, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
+    const user = await User.findById(req.user.id).select('-password').lean();
     res.json(user);
   } catch (err) {
     console.error(err.message);

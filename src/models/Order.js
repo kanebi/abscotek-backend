@@ -190,7 +190,7 @@ const OrderSchema = new mongoose.Schema({
   },
   paymentNetwork: {
     type: String,
-    enum: ['ethereum', 'polygon', 'bsc'],
+    enum: ['base', 'ethereum', 'polygon', 'bsc'],
     sparse: true,
     default: null
   },
@@ -201,6 +201,26 @@ const OrderSchema = new mongoose.Schema({
   requiredConfirmations: {
     type: Number,
     default: 3
+  },
+  // Fund sweeping fields
+  fundsSwept: {
+    type: Boolean,
+    default: false
+  },
+  fundsSweptAt: {
+    type: Date,
+    sparse: true,
+    default: null
+  },
+  fundsSweptTxHash: {
+    type: String,
+    sparse: true,
+    default: null
+  },
+  fundsSweptNote: {
+    type: String,
+    sparse: true,
+    default: null
   }
 }, {
   timestamps: true

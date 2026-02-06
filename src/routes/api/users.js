@@ -14,6 +14,7 @@ const jwtSecret = process.env.JWT_SECRET || 'supersecretjwttoken';
 const auth = require('../../middleware/auth');
 const User = require('../../models/User');
 const { Order } = require('../../models/Order');
+const blockchainPaymentService = require('../../services/blockchainPaymentService');
 
 // @desc    Register user
 // @route   POST api/users
@@ -93,7 +94,7 @@ router.post(
 // @access  Private
 router.get('/profile', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
+    const user = await User.findById(req.user.id).select('-password').lean();
     res.json(user);
   } catch (err) {
     console.error(err.message);
@@ -128,6 +129,48 @@ router.get('/profile/stats', auth, async (req, res) => {
     console.error('Error stack:', err.stack);
     res.status(500).json({ 
       msg: 'Server Error',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  }
+});
+
+// @desc    Get user's tied crypto payment address (platform address for receiving order payments)
+// @route   GET api/users/crypto-payment-address
+// @access  Private
+router.get('/crypto-payment-address', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('cryptoPaymentAddress');
+    if (!user) return res.status(404).json({ msg: 'User not found' });
+    if (user.cryptoPaymentAddress) {
+      return res.json({ address: user.cryptoPaymentAddress });
+    }
+    // Lazy-create on first fetch (e.g. before first order)
+    const blockchainPaymentService = require('../../services/blockchainPaymentService');
+    const address = blockchainPaymentService.generatePaymentAddressForUser(req.user.id);
+    user.cryptoPaymentAddress = address;
+    await user.save();
+    return res.json({ address });
+  } catch (err) {
+    console.error('Error getting crypto payment address:', err);
+    return res.status(500).json({ msg: 'Failed to get payment address' });
+  }
+});
+
+// @desc    Get user wallet USDT balance (blockchain)
+// @route   GET api/users/wallet-balance
+// @access  Private
+router.get('/wallet-balance', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('walletAddress');
+    if (!user || !user.walletAddress) {
+      return res.json({ balance: '0', address: null });
+    }
+    const balance = await blockchainPaymentService.getUSDTBalance(user.walletAddress);
+    return res.json({ balance: String(balance), address: user.walletAddress });
+  } catch (err) {
+    console.error('Error fetching wallet balance:', err);
+    return res.status(500).json({
+      msg: 'Failed to fetch wallet balance',
       error: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
   }

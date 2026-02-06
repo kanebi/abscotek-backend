@@ -1953,8 +1953,18 @@ const createCryptoPaymentOrder = async (req, res) => {
       currency = 'USDT',
       orderCurrency, // Native currency for order calculations (USD for non-NGN, NGN for NGN)
       notes = '',
-      network = 'ethereum' // ethereum, polygon, bsc
+      network = 'base', // base, ethereum, polygon, bsc
+      walletAddress: requestWalletAddress // User's connected wallet - attach to user if not already set
     } = req.body;
+
+    // Attach user's wallet to their profile if provided and they don't have one (never overwrite existing)
+    if (requestWalletAddress && /^0x[0-9a-fA-F]{40}$/.test(requestWalletAddress)) {
+      const user = await User.findById(req.user.id).session(session);
+      if (user && !user.walletAddress) {
+        user.walletAddress = requestWalletAddress;
+        await user.save({ session });
+      }
+    }
 
     // Get user's cart
     let cart = await Cart.findOne({ user: req.user.id })
@@ -2046,6 +2056,57 @@ const createCryptoPaymentOrder = async (req, res) => {
       }
     }
 
+    // Check for existing uncompleted order with exact same items (prevent duplicates)
+    const cartSignature = activeItems
+      .map((i) => `${i.product._id.toString()}:${i.quantity}`)
+      .sort()
+      .join('|');
+    const existingUncompleted = await Order.find({
+      buyer: req.user.id,
+      status: 'pending',
+      paymentStatus: 'unpaid',
+      paymentMethod: 'crypto',
+      deliveryMethod: deliveryMethodId,
+      shippingAddress: shippingAddressId || null,
+      paymentExpiry: { $gt: new Date() } // Only reuse if not expired
+    })
+      .populate('items')
+      .session(session)
+      .lean();
+
+    for (const ex of existingUncompleted) {
+      if (!ex.items || ex.items.length !== activeItems.length) continue;
+      const exSignature = ex.items
+        .map((i) => {
+          const pid = i.product && (i.product._id || i.product);
+          return `${pid ? pid.toString() : ''}:${i.quantity || 0}`;
+        })
+        .sort()
+        .join('|');
+      if (exSignature === cartSignature && ex.paymentAddress) {
+        await session.commitTransaction();
+        transactionCommitted = true;
+        const QRCode = require('qrcode');
+        let qrCodeDataUrl = null;
+        try {
+          const paymentURI = `${(ex.paymentNetwork || network) === 'ethereum' ? 'ethereum' : (ex.paymentNetwork || network)}:${ex.paymentAddress}?value=${totalAmount}`;
+          qrCodeDataUrl = await QRCode.toDataURL(paymentURI);
+        } catch (qrErr) {
+          console.error('Error generating QR for reused order:', qrErr);
+        }
+        return res.status(200).json({
+          orderId: ex._id.toString(),
+          paymentAddress: ex.paymentAddress,
+          amount: totalAmount,
+          currency,
+          network: ex.paymentNetwork || network,
+          qrCode: qrCodeDataUrl,
+          expiry: ex.paymentExpiry,
+          reused: true
+        });
+      }
+    }
+
     // Create order with pending payment status
     // Store order values in order currency (USD for non-NGN, NGN for NGN)
     // But totalAmount should be in payment currency
@@ -2067,10 +2128,22 @@ const createCryptoPaymentOrder = async (req, res) => {
 
     await order.save({ session });
 
-    // Generate payment address for this order
+    // Use user-tied payment address: one per user, never regenerate if user has one
     const blockchainPaymentService = require('../services/blockchainPaymentService');
-    const paymentAddress = blockchainPaymentService.generatePaymentAddress(order._id.toString());
-    
+    const userId = String(req.user.id || req.user._id);
+    let userDoc = await User.findById(userId).session(session);
+    let paymentAddress;
+    if (userDoc && userDoc.cryptoPaymentAddress) {
+      paymentAddress = userDoc.cryptoPaymentAddress;
+    } else {
+      paymentAddress = blockchainPaymentService.generatePaymentAddressForUser(userId);
+      if (!userDoc) userDoc = await User.findById(userId).session(session);
+      if (userDoc) {
+        userDoc.cryptoPaymentAddress = paymentAddress;
+        await userDoc.save({ session });
+      }
+    }
+
     // Set payment address and expiry (30 minutes)
     order.paymentAddress = paymentAddress;
     order.paymentExpiry = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
@@ -2162,6 +2235,24 @@ const createCryptoPaymentOrder = async (req, res) => {
             const buyer = await User.findById(confirmedOrder.buyer);
             if (buyer && buyer.referredBy) {
               await awardReferralBonus(buyer._id, confirmedOrder.totalAmount);
+            }
+
+            // Pay from wallet: transfer to platform wallet (user-tied address uses buyerId for sweep)
+            try {
+              const payResult = await blockchainPaymentService.payFromWallet(
+                confirmedOrder._id.toString(),
+                confirmedOrder.currency,
+                { buyerId: confirmedOrder.buyer.toString() }
+              );
+              if (payResult.success) {
+                confirmedOrder.fundsSwept = true;
+                confirmedOrder.fundsSweptAt = new Date();
+                confirmedOrder.fundsSweptTxHash = payResult.transactionHash;
+                await confirmedOrder.save();
+                console.log(`Order ${confirmedOrder._id} funds swept to platform wallet`);
+              }
+            } catch (sweepErr) {
+              console.error(`Order ${confirmedOrder._id} payFromWallet error (sweeper will retry):`, sweepErr.message);
             }
 
             // Reduce stock

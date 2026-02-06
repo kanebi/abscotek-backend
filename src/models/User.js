@@ -28,6 +28,12 @@ const UserSchema = new mongoose.Schema({
     sparse: true,
     match: /^0x[0-9a-fA-F]{40}$/
   },
+  /** Platform-generated payment address tied to user for receiving crypto (one per user, reused for all orders) */
+  cryptoPaymentAddress: {
+    type: String,
+    sparse: true,
+    match: /^0x[0-9a-fA-F]{40}$/
+  },
   privyUserId: {
     type: String,
     unique: true,
