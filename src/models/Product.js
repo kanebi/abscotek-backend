@@ -47,8 +47,8 @@ const ProductSchema = new mongoose.Schema(
     },
     currency: {
       type: String,
-      enum: ['USDT'],
-      default: 'USDT',
+      enum: ['USDC'],
+      default: 'USDC',
     },
     images: {
       type: [
@@ -79,7 +79,7 @@ const ProductSchema = new mongoose.Schema(
     variants: [{
       name: { type: String, required: true },
       price: { type: Number, required: true, min: 0 },
-      currency: { type: String, enum: ['USDT'], default: 'USDT' },
+      currency: { type: String, enum: ['USDC'], default: 'USDC' },
       stock: { type: Number, default: 0, min: 0 },
       sku: { type: String, default: null },
       attributes: [{

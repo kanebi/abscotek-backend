@@ -38,7 +38,7 @@ const CartItemSchema = new mongoose.Schema({
   },
   currency: {
     type: String,
-    enum: ['USDT', 'USD', 'NGN', 'EUR'],
+    enum: ['USDC', 'USD', 'NGN', 'EUR'],
     required: true
   },
   status: {
@@ -57,8 +57,8 @@ const CartSchema = new mongoose.Schema({
   items: [CartItemSchema],
   currency: {
     type: String,
-    enum: ['USDT', 'USD', 'NGN', 'EUR'],
-    default: 'USDT'
+    enum: ['USDC', 'USD', 'NGN', 'EUR'],
+    default: 'USDC'
   },
   subtotal: {
     type: Number,

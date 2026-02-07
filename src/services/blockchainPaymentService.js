@@ -266,20 +266,77 @@ class BlockchainPaymentService {
 
   /**
    * Check if address received payment
+   * @param {string} address - Payment address
+   * @param {number} expectedAmount - Expected amount
+   * @param {string} [currency='USDC'] - Currency: USDC for token, or native (ETH/MATIC/BNB)
    */
-  async checkPaymentReceived(address, expectedAmount) {
+  async checkPaymentReceived(address, expectedAmount, currency = 'USDC') {
     try {
+      const isToken = currency === 'USDC' || currency === 'USD';
+      if (isToken) {
+        return this.checkTokenPaymentReceived(address, expectedAmount, 'USDC');
+      }
       const balance = await this.getBalanceWei(address);
       const expectedWei = this.amountToWei(expectedAmount);
-      
-      // Allow small tolerance for rounding (0.1%)
       const tolerance = expectedWei / 1000n;
       const minAmount = expectedWei - tolerance;
-      
       return balance >= minAmount;
     } catch (error) {
       console.error('Error checking payment:', error);
       return false;
+    }
+  }
+
+  /**
+   * Check if address received token payment (USDC)
+   */
+  async checkTokenPaymentReceived(address, expectedAmount, token = 'USDC') {
+    try {
+      const balanceRaw = await this.getUSDCBalanceRaw(address);
+      const tokenContract = this.getUSDCContractAddress();
+      const tokenContractObj = new ethers.Contract(tokenContract, this.erc20ABI, this.provider);
+      const decimals = await tokenContractObj.decimals();
+      // Round to token decimals to avoid "too many decimals" (e.g. 63.333333333333336 with USDC 6 decimals)
+      const roundedAmount = Number(expectedAmount).toFixed(Number(decimals));
+      const expectedRaw = ethers.parseUnits(roundedAmount, decimals);
+      const tolerance = expectedRaw / 1000n;
+      const minAmount = expectedRaw - tolerance;
+      return balanceRaw >= minAmount;
+    } catch (error) {
+      console.error('Error checking token payment:', error);
+      return false;
+    }
+  }
+
+  getUSDCContractAddress() {
+    const networkTokens = this.tokenContracts[this.network];
+    if (!networkTokens || !networkTokens.USDC) {
+      throw new Error(`USDC not supported on network: ${this.network}`);
+    }
+    return networkTokens.USDC;
+  }
+
+  async getUSDCBalance(address) {
+    try {
+      const usdcAddress = this.getUSDCContractAddress();
+      const tokenContract = new ethers.Contract(usdcAddress, this.erc20ABI, this.provider);
+      const balance = await tokenContract.balanceOf(address);
+      const decimals = await tokenContract.decimals();
+      return ethers.formatUnits(balance, decimals);
+    } catch (error) {
+      console.error('Error getting USDC balance:', error);
+      throw error;
+    }
+  }
+
+  async getUSDCBalanceRaw(address) {
+    try {
+      const usdcAddress = this.getUSDCContractAddress();
+      const tokenContract = new ethers.Contract(usdcAddress, this.erc20ABI, this.provider);
+      return await tokenContract.balanceOf(address);
+    } catch (error) {
+      console.error('Error getting USDC balance raw:', error);
+      throw error;
     }
   }
 
@@ -405,126 +462,96 @@ class BlockchainPaymentService {
    * Pay from wallet: transfer order amount to platform wallet (MAIN_WALLET_ADDRESS from env).
    * Supports both user-tied addresses (one per user) and legacy order-specific addresses.
    * @param {string} orderId - Order ID
-   * @param {string} currency - Order currency (USDT, USD, etc.)
+   * @param {string} currency - Order currency (USDC, USDT, USD, etc.)
    * @param {Object} options - { buyerId } for user-tied address lookup
    * @returns {Promise<Object>} Result of sweep
    */
-  async payFromWallet(orderId, currency = 'USDT', options = {}) {
+  async payFromWallet(orderId, currency = 'USDC', options = {}) {
     const mainWalletAddress = process.env.MAIN_WALLET_ADDRESS;
     if (!mainWalletAddress) {
       throw new Error('MAIN_WALLET_ADDRESS not set in environment');
     }
-    const isUSDT = currency === 'USDT' || currency === 'USD';
+    const isStablecoin = currency === 'USDC' || currency === 'USD';
     const useUserTied = !!options.buyerId;
+    const token = 'USDC';
     if (useUserTied) {
-      return isUSDT ? this.sweepUSDTByUser(options.buyerId, mainWalletAddress) : this.sweepFundsByUser(options.buyerId, mainWalletAddress);
+      return isStablecoin ? this.sweepTokenByUser(options.buyerId, mainWalletAddress, token) : this.sweepFundsByUser(options.buyerId, mainWalletAddress);
     }
-    return isUSDT ? this.sweepUSDT(orderId, mainWalletAddress) : this.sweepFunds(orderId, mainWalletAddress);
+    return isStablecoin ? this.sweepToken(orderId, mainWalletAddress, token) : this.sweepFunds(orderId, mainWalletAddress);
   }
 
-  /**
-   * Sweep USDT from user-tied payment address
-   */
-  async sweepUSDTByUser(userId, mainWalletAddress) {
+  async sweepTokenByUser(userId, mainWalletAddress, token = 'USDC') {
     const paymentWallet = this.getPaymentWalletForUser(userId);
     const paymentAddress = paymentWallet.address;
-    return this._sweepUSDTFromWallet(paymentWallet, paymentAddress, mainWalletAddress);
+    return this._sweepTokenFromWallet(paymentWallet, paymentAddress, mainWalletAddress, token);
   }
 
-  /**
-   * Sweep USDT tokens from a payment address to the main wallet
-   * @param {string} orderId - Order ID to get payment address
-   * @param {string} mainWalletAddress - Address to send USDT to
-   * @returns {Promise<Object>} Transaction receipt
-   */
-  async sweepUSDT(orderId, mainWalletAddress) {
+  async sweepToken(orderId, mainWalletAddress, token = 'USDC') {
     try {
       const paymentWallet = this.getPaymentWallet(orderId);
       const paymentAddress = paymentWallet.address;
-      return this._sweepUSDTFromWallet(paymentWallet, paymentAddress, mainWalletAddress);
+      return this._sweepTokenFromWallet(paymentWallet, paymentAddress, mainWalletAddress, token);
     } catch (error) {
-      console.error('Error sweeping USDT:', error);
+      console.error(`Error sweeping ${token}:`, error);
       throw error;
     }
   }
 
-  async _sweepUSDTFromWallet(paymentWallet, paymentAddress, mainWalletAddress) {
+  async _sweepTokenFromWallet(paymentWallet, paymentAddress, mainWalletAddress, token = 'USDC') {
     try {
-      // Get USDT contract
-      const usdtAddress = this.getUSDTContractAddress();
-      const tokenContract = new ethers.Contract(usdtAddress, this.erc20ABI, paymentWallet);
+      const tokenAddress = this.getUSDCContractAddress();
+      const tokenContract = new ethers.Contract(tokenAddress, this.erc20ABI, paymentWallet);
+      const balanceRaw = await this.getUSDCBalanceRaw(paymentAddress);
 
-      // Check USDT balance
-      const usdtBalance = await this.getUSDTBalanceRaw(paymentAddress);
-      
-      if (usdtBalance === 0n) {
-        return { success: false, message: 'No USDT to sweep', balance: '0' };
+      if (balanceRaw === 0n) {
+        return { success: false, message: `No ${token} to sweep`, balance: '0' };
       }
 
-      // Get decimals
       const decimals = await tokenContract.decimals();
-      const usdtBalanceFormatted = ethers.formatUnits(usdtBalance, decimals);
-
-      // Get fee data for gas
+      const balanceFormatted = ethers.formatUnits(balanceRaw, decimals);
       const feeData = await this.provider.getFeeData();
-      const gasPrice = feeData.gasPrice || feeData.maxFeePerGas || (await this.provider.getFeeData()).gasPrice;
-      
-      if (!gasPrice) {
-        throw new Error('Unable to get gas price');
-      }
+      const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
+      if (!gasPrice) throw new Error('Unable to get gas price');
 
-      // Estimate gas for token transfer (ERC-20 transfer typically needs ~65,000 gas)
       let gasEstimate;
       try {
-        gasEstimate = await tokenContract.transfer.estimateGas(mainWalletAddress, usdtBalance);
+        gasEstimate = await tokenContract.transfer.estimateGas(mainWalletAddress, balanceRaw);
       } catch (error) {
-        // Fallback to standard ERC-20 transfer gas
         gasEstimate = 65000n;
       }
 
-      // Calculate gas cost
       const gasCost = (gasEstimate * gasPrice * 120n) / 100n;
-
-      // Check if payment address has enough native token (ETH/MATIC/BNB) for gas
       const nativeBalance = await this.getBalanceWei(paymentAddress);
-      
+
       if (nativeBalance < gasCost) {
-        return { 
-          success: false, 
-          message: 'Insufficient native token (ETH/MATIC/BNB) to cover gas fees for USDT transfer', 
-          usdtBalance: usdtBalanceFormatted,
+        return {
+          success: false,
+          message: `Insufficient native token to cover gas fees for ${token} transfer`,
+          usdcBalance: balanceFormatted,
           nativeBalance: ethers.formatEther(nativeBalance),
           gasCost: ethers.formatEther(gasCost)
         };
       }
 
-      // Transfer USDT
-      console.log(`Sweeping ${usdtBalanceFormatted} USDT from ${paymentAddress} to ${mainWalletAddress}`);
-      
-      const tx = await tokenContract.transfer(mainWalletAddress, usdtBalance, {
-        gasLimit: gasEstimate,
-        gasPrice: gasPrice
-      });
-
-      console.log(`USDT transfer transaction hash: ${tx.hash}`);
-
-      // Wait for transaction
+      console.log(`Sweeping ${balanceFormatted} ${token} from ${paymentAddress} to ${mainWalletAddress}`);
+      const tx = await tokenContract.transfer(mainWalletAddress, balanceRaw, { gasLimit: gasEstimate, gasPrice });
       const receipt = await tx.wait();
 
       return {
         success: true,
         transactionHash: tx.hash,
-        receipt: receipt,
-        amount: usdtBalanceFormatted,
-        token: 'USDT',
+        receipt,
+        amount: balanceFormatted,
+        token,
         from: paymentAddress,
         to: mainWalletAddress
       };
     } catch (error) {
-      console.error('Error sweeping USDT:', error);
+      console.error(`Error sweeping ${token}:`, error);
       throw error;
     }
   }
+
 
   /**
    * Sweep native funds from user-tied payment address

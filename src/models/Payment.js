@@ -18,9 +18,9 @@ const PaymentSchema = new mongoose.Schema({
   },
   currency: {
     type: String,
-    enum: ['USDT', 'USD', 'NGN', 'EUR'],
+    enum: ['USDC', 'USD', 'NGN', 'EUR'],
     required: true,
-    default: 'USDT'
+    default: 'USDC'
   },
   method: {
     type: String,

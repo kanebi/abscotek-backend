@@ -33,7 +33,8 @@ const paymentVerificationJob = cron.schedule('* * * * *', async () => {
         // Check if payment received
         const paymentReceived = await blockchainPaymentService.checkPaymentReceived(
           order.paymentAddress,
-          order.totalAmount
+          order.totalAmount,
+          order.currency || 'USDC'
         );
 
         if (paymentReceived) {

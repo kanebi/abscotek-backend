@@ -24,7 +24,7 @@ const DeliveryMethodSchema = new mongoose.Schema({
     type: String,
     required: true,
     default: 'NGN',
-    enum: ['USDT', 'USD', 'NGN', 'EUR']
+    enum: ['USDC', 'USD', 'NGN', 'EUR']
   },
   estimatedDeliveryTime: {
     type: String,

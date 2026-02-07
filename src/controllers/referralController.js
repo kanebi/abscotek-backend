@@ -3,7 +3,7 @@ const User = require('../models/User');
 const Withdrawal = require('../models/Withdrawal');
 const { v4: uuidv4 } = require('uuid');
 
-const REFERRAL_REWARD_AMOUNT = 4; // 4 USDT
+const REFERRAL_REWARD_AMOUNT = 4; // 4 USDC
 
 // @desc    Generate a referral link for the authenticated user
 // @route   POST /api/referrals/generate
@@ -74,7 +74,7 @@ const awardReferralBonus = async (referredUserId) => {
       if (referrer) {
         referrer.balance += REFERRAL_REWARD_AMOUNT;
         await referrer.save();
-        console.log(`Awarded ${REFERRAL_REWARD_AMOUNT} USDT to referrer ${referrer.id}`);
+        console.log(`Awarded ${REFERRAL_REWARD_AMOUNT} USDC to referrer ${referrer.id}`);
       }
     }
   } catch (err) {

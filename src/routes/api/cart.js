@@ -47,8 +47,8 @@ const {
  *                     $ref: '#/components/schemas/CartItem'
  *                 currency:
  *                   type: string
- *                   enum: [USDT, USD, NGN, EUR]
- *                   default: USDT
+ *                   enum: [USDC, USD, NGN, EUR]
+ *                   default: USDC
  *                 subtotal:
  *                   type: number
  *                   description: Cart subtotal
@@ -118,8 +118,8 @@ router.get('/', auth, getCart);
  *                     $ref: '#/components/schemas/CartItem'
  *                 currency:
  *                   type: string
- *                   enum: [USDT, USD, NGN, EUR]
- *                   default: USDT
+ *                   enum: [USDC, USD, NGN, EUR]
+ *                   default: USDC
  *                 subtotal:
  *                   type: number
  *                   description: Cart subtotal
@@ -184,7 +184,7 @@ router.get('/:userId', auth, getCartByUserId);
  *                 description: Quantity to add
  *               currency:
  *                 type: string
- *                 enum: [USDT, USD, NGN, EUR]
+ *                 enum: [USDC, USD, NGN, EUR]
  *                 description: Currency for the item
  *     responses:
  *       200:

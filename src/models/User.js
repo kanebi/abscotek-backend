@@ -53,8 +53,8 @@ const UserSchema = new mongoose.Schema({
   preferences: {
     currency: {
       type: String,
-      enum: ['USDT', 'USD', 'NGN', 'EUR'],
-      default: 'USDT'
+      enum: ['USDC', 'USD', 'NGN', 'EUR'],
+      default: 'USDC'
     }
   },
   role: {

@@ -19,21 +19,26 @@ class TransactionMonitor {
 
   /**
    * Start monitoring an address for payment
+   * @param {string} orderId
+   * @param {string} address
+   * @param {number} expectedAmount
+   * @param {Function} callback
+   * @param {string} [currency='USDC'] - Payment currency (USDC for token payments)
    */
-  startMonitoring(orderId, address, expectedAmount, callback = null) {
+  startMonitoring(orderId, address, expectedAmount, callback = null, currency = 'USDC') {
     this.monitoredAddresses.set(orderId, {
       address,
       expectedAmount: parseFloat(expectedAmount),
+      currency: currency || 'USDC',
       startTime: Date.now(),
       callback
     });
 
-    // Start global monitoring if not already started
     if (!this.isMonitoring) {
       this.startGlobalMonitoring();
     }
 
-    console.log(`Started monitoring address ${address} for order ${orderId}, expected: ${expectedAmount}`);
+    console.log(`Started monitoring address ${address} for order ${orderId}, expected: ${expectedAmount} ${currency}`);
   }
 
   /**
@@ -104,11 +109,12 @@ class TransactionMonitor {
     if (this.monitoredAddresses.size === 0) return;
 
     const promises = Array.from(this.monitoredAddresses.entries()).map(
-      async ([orderId, { address, expectedAmount, callback }]) => {
+      async ([orderId, { address, expectedAmount, currency, callback }]) => {
         try {
           const paymentReceived = await blockchainPaymentService.checkPaymentReceived(
             address,
-            expectedAmount
+            expectedAmount,
+            currency || 'USDC'
           );
 
           if (paymentReceived) {
@@ -152,13 +158,14 @@ class TransactionMonitor {
         if (!tx.to) continue;
 
         // Check if this transaction is to any monitored address
-        for (const [orderId, { address, expectedAmount, callback }] of this.monitoredAddresses.entries()) {
-          if (tx.to.toLowerCase() === address.toLowerCase()) {
-            // Verify amount matches
-            const txValue = ethers.formatEther(tx.value);
+        for (const [orderId, { address, expectedAmount, currency, callback }] of this.monitoredAddresses.entries()) {
+          if (tx.to?.toLowerCase() === address.toLowerCase()) {
+            // For token payments (USDC), block listener checks native tx.value which is 0 - skip block-based detection for tokens
+            if (currency === 'USDC' || currency === 'USD') {
+              continue; // Token payments detected via polling checkPaymentReceived
+            }
+            const txValue = ethers.formatEther(tx.value || 0n);
             const expectedValue = expectedAmount.toString();
-
-            // Allow small tolerance (0.1%)
             const tolerance = expectedAmount * 0.001;
             if (Math.abs(parseFloat(txValue) - expectedAmount) <= tolerance) {
               console.log(`Payment detected in block ${blockNumber} for order ${orderId}`);

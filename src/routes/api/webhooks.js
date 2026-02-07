@@ -66,7 +66,7 @@ async function processPaymentActivity(activity) {
   try {
     const { fromAddress, toAddress, value, hash, asset, category } = activity;
 
-    // Only process native token transfers (ETH, MATIC, BNB) or USDT
+    // Only process native token transfers (ETH, MATIC, BNB) or USDC
     if (category !== 'external' && category !== 'token') {
       return;
     }
@@ -88,8 +88,8 @@ async function processPaymentActivity(activity) {
     if (category === 'external') {
       // Native token (ETH, MATIC, BNB)
       receivedAmount = parseFloat(blockchainPaymentService.weiToAmount(value || '0'));
-    } else if (category === 'token' && asset === 'USDT') {
-      // USDT token (18 decimals)
+    } else if (category === 'token' && asset === 'USDC') {
+      // USDC token (6 decimals)
       receivedAmount = parseFloat(blockchainPaymentService.weiToAmount(value || '0'));
     }
 

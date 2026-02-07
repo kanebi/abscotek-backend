@@ -44,9 +44,9 @@ const OrderItemSchema = new mongoose.Schema({
   },
   currency: {
     type: String,
-    enum: ['USDT', 'USD', 'NGN', 'EUR'],
+    enum: ['USDC', 'USD', 'NGN', 'EUR'],
     required: true,
-    default: 'USDT'
+    default: 'USDC'
   },
   status: {
     type: String,
@@ -64,6 +64,12 @@ const OrderItemSchema = new mongoose.Schema({
   }
 }, {
   timestamps: true
+});
+
+// Normalize USDT to USDC before validation (enum only allows USDC)
+OrderItemSchema.pre('validate', function (next) {
+  if (this.currency === 'USDT') this.currency = 'USDC';
+  next();
 });
 
 
@@ -124,8 +130,8 @@ const OrderSchema = new mongoose.Schema({
   currency: {
     type: String,
     required: true,
-    enum: ['USDT', 'USD', 'NGN', 'EUR'],
-    default: 'USDT'
+    enum: ['USDC', 'USD', 'NGN', 'EUR'],
+    default: 'USDC'
   },
   status: {
     type: String,
@@ -248,9 +254,9 @@ OrderSchema.virtual('calculatedTotal').get(function() {
   let deliveryFee = this.deliveryFee || 0;
   if (this.deliveryMethod && this.deliveryMethod.currency && this.deliveryMethod.currency !== this.currency) {
     // Convert delivery fee to order currency
-    if (this.deliveryMethod.currency === 'NGN' && this.currency === 'USDT') {
+    if (this.deliveryMethod.currency === 'NGN' && this.currency === 'USDC') {
       deliveryFee = this.deliveryMethod.price / 1500;
-    } else if (this.deliveryMethod.currency === 'USDT' && this.currency === 'NGN') {
+    } else if (this.deliveryMethod.currency === 'USDC' && this.currency === 'NGN') {
       deliveryFee = this.deliveryMethod.price * 1500;
     }
   }

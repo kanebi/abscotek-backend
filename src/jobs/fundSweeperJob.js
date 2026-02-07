@@ -34,49 +34,43 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
     for (const order of ordersToSweep) {
       try {
         const orderId = order._id.toString();
-        const currency = order.currency || 'USDT';
+        const currency = order.currency || 'USDC';
         
-        // Determine if we need to sweep USDT token or native token
-        const isUSDT = currency === 'USDT';
+        // Determine if we need to sweep stablecoin token or native token
+        const isStablecoin = currency === 'USDC' || currency === 'USD';
         
-        if (isUSDT) {
-          // Sweep USDT token
-          const usdtBalance = await blockchainPaymentService.getUSDTBalance(order.paymentAddress);
-          const usdtBalanceRaw = await blockchainPaymentService.getUSDTBalanceRaw(order.paymentAddress);
+        if (isStablecoin) {
+          const tokenBalance = await blockchainPaymentService.getUSDCBalance(order.paymentAddress);
+          const tokenBalanceRaw = await blockchainPaymentService.getUSDCBalanceRaw(order.paymentAddress);
 
-          if (usdtBalanceRaw === 0n) {
-            // No USDT, check if we should mark as swept
-            // Also check native balance for gas
+          if (tokenBalanceRaw === 0n) {
             const nativeBalance = await blockchainPaymentService.getBalanceWei(order.paymentAddress);
             if (nativeBalance === 0n) {
               order.fundsSwept = true;
               await order.save();
-              console.log(`Order ${orderId}: No USDT or native token to sweep`);
+              console.log(`Order ${orderId}: No USDC or native token to sweep`);
               continue;
             }
           }
 
-          console.log(`Order ${orderId}: Sweeping ${usdtBalance} USDT from ${order.paymentAddress}...`);
+          console.log(`Order ${orderId}: Sweeping ${tokenBalance} USDC from ${order.paymentAddress}...`);
 
-          // Use user-tied sweep if order uses user's cryptoPaymentAddress
           const buyer = await User.findById(order.buyer).select('cryptoPaymentAddress');
           const isUserTied = buyer?.cryptoPaymentAddress && buyer.cryptoPaymentAddress === order.paymentAddress;
           const sweepOptions = isUserTied ? { buyerId: order.buyer.toString() } : {};
-          const result = await blockchainPaymentService.payFromWallet(orderId, 'USDT', sweepOptions);
+          const result = await blockchainPaymentService.payFromWallet(orderId, currency, sweepOptions);
 
           if (result.success) {
-            // Mark as swept
             order.fundsSwept = true;
             order.fundsSweptAt = new Date();
             order.fundsSweptTxHash = result.transactionHash;
             await order.save();
 
-            console.log(`Order ${orderId}: Successfully swept ${result.amount} USDT`);
+            console.log(`Order ${orderId}: Successfully swept ${result.amount} USDC`);
             console.log(`Transaction: ${result.transactionHash}`);
           } else {
             console.log(`Order ${orderId}: ${result.message}`);
             if (result.message && result.message.includes('Insufficient native token')) {
-              // Can't sweep USDT due to lack of gas, but keep trying
               // Don't mark as swept yet - might get native token later for gas
               console.log(`Order ${orderId}: Waiting for native token to cover gas fees`);
             } else {

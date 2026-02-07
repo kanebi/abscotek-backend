@@ -35,10 +35,10 @@ const createOrder = async (req, res) => {
       if (product) {
         // Convert item price to order currency if different
         let itemPrice = product.price;
-        if (product.currency && product.currency !== 'USDT') {
-          // For now, assume USDT/USD are 1:1, and NGN conversion
+        if (product.currency && product.currency !== 'USDC') {
+          // For now, assume USDC/USD are 1:1, and NGN conversion
           if (product.currency === 'NGN') {
-            itemPrice = product.price / 1500; // Convert NGN to USDT
+            itemPrice = product.price / 1500; // Convert NGN to USDC
           }
           // Add more conversion logic as needed for other currencies
         }
@@ -85,7 +85,7 @@ const createOrder = async (req, res) => {
       deliveryFee,
       totalAmount: totalAmountUSD,
       status: 'pending', // Changed from 'orderStatus' to 'status'
-      currency: 'USDT', // Add currency field
+      currency: 'USDC', // Add currency field
       // Add contract address if user has wallet
       contractAddress: req.user.walletAddress ? `0x${req.user.walletAddress.slice(2)}` : null,
       // Add shipping address ID if provided
@@ -134,7 +134,7 @@ const checkoutFromCart = async (req, res) => {
       shippingAddressId, 
       paymentMethod = 'wallet',
       walletAddress,
-      currency = 'USDT',
+      currency = 'USDC',
       notes = ''
     } = req.body;
 
@@ -157,11 +157,11 @@ const checkoutFromCart = async (req, res) => {
       // Convert item price to order currency if different
       let itemPrice = item.product.price;
       if (item.product.currency && item.product.currency !== currency) {
-        // For now, assume USDT/USD are 1:1, and NGN conversion
-        if (item.product.currency === 'NGN' && currency === 'USDT') {
-          itemPrice = item.product.price / 1500; // Convert NGN to USDT
-        } else if (item.product.currency === 'USDT' && currency === 'NGN') {
-          itemPrice = item.product.price * 1500; // Convert USDT to NGN
+        // For now, assume USDC/USD are 1:1, and NGN conversion
+        if (item.product.currency === 'NGN' && currency === 'USDC') {
+          itemPrice = item.product.price / 1500; // Convert NGN to USDC
+        } else if (item.product.currency === 'USDC' && currency === 'NGN') {
+          itemPrice = item.product.price * 1500; // Convert USDC to NGN
         }
         // Add more conversion logic as needed for other currencies
       }
@@ -1207,7 +1207,7 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
       paystackReference,
       deliveryMethodId,
       shippingAddressId,
-      currency = 'USDT',
+      currency = 'USDC',
       notes = ''
     } = req.body;
 
@@ -1231,11 +1231,11 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
       // Convert item price to order currency if different
       let itemPrice = item.product.price;
       if (item.product.currency && item.product.currency !== currency) {
-        // For now, assume USDT/USD are 1:1, and NGN conversion
-        if (item.product.currency === 'NGN' && currency === 'USDT') {
-          itemPrice = item.product.price / 1500; // Convert NGN to USDT
-        } else if (item.product.currency === 'USDT' && currency === 'NGN') {
-          itemPrice = item.product.price * 1500; // Convert USDT to NGN
+        // For now, assume USDC/USD are 1:1, and NGN conversion
+        if (item.product.currency === 'NGN' && currency === 'USDC') {
+          itemPrice = item.product.price / 1500; // Convert NGN to USDC
+        } else if (item.product.currency === 'USDC' && currency === 'NGN') {
+          itemPrice = item.product.price * 1500; // Convert USDC to NGN
         }
         // Add more conversion logic as needed for other currencies
       }
@@ -1314,7 +1314,7 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
         quantity: cartItem.quantity,
         unitPrice: cartItem.unitPrice || cartItem.product.price,
         totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
-        currency: cartItem.currency || currency,
+        currency: (cartItem.currency || cartItem.product?.currency || currency) === 'USDT' ? 'USDC' : (cartItem.currency || cartItem.product?.currency || currency),
         status: 'ordered',
         // Include product image data directly
         productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
@@ -1752,15 +1752,15 @@ const cancelOrder = async (req, res) => {
   }
 };
 
-// @desc    Process USDT wallet payment
-// @route   POST /api/orders/usdt-payment
+// @desc    Process USDC wallet payment
+// @route   POST /api/orders/usdc-payment
 // @access  Private
-const processUSDTWalletPayment = async (req, res) => {
+const processUSDCWalletPayment = async (req, res) => {
   try {
     const {
       deliveryMethodId,
       shippingAddressId,
-      currency = 'USDT',
+      currency = 'USDC',
       notes = ''
     } = req.body;
 
@@ -1789,9 +1789,9 @@ const processUSDTWalletPayment = async (req, res) => {
     for (const item of activeItems) {
       let itemPrice = item.product.price;
       if (item.product.currency && item.product.currency !== currency) {
-        if (item.product.currency === 'NGN' && currency === 'USDT') {
+        if (item.product.currency === 'NGN' && currency === 'USDC') {
           itemPrice = item.product.price / 1500;
-        } else if (item.product.currency === 'USDT' && currency === 'NGN') {
+        } else if (item.product.currency === 'USDC' && currency === 'NGN') {
           itemPrice = item.product.price * 1500;
         }
       }
@@ -1809,7 +1809,7 @@ const processUSDTWalletPayment = async (req, res) => {
     // Check if user has sufficient balance
     if (req.user.platformBalance < totalAmount) {
       return res.status(400).json({
-        msg: 'Insufficient USDT balance. Please top up your account or use a different payment method.',
+        msg: 'Insufficient USDC balance. Please top up your account or use a different payment method.',
         required: totalAmount,
         available: req.user.platformBalance,
         shortfall: totalAmount - req.user.platformBalance
@@ -1831,7 +1831,7 @@ const processUSDTWalletPayment = async (req, res) => {
       currency,
       status: 'confirmed',
       paymentStatus: 'paid',
-      paymentMethod: 'usdt_wallet',
+      paymentMethod: 'usdc_wallet',
       notes
     });
 
@@ -1848,7 +1848,7 @@ const processUSDTWalletPayment = async (req, res) => {
         quantity: cartItem.quantity,
         unitPrice: cartItem.unitPrice || cartItem.product.price,
         totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
-        currency: cartItem.currency || currency,
+        currency: (cartItem.currency || cartItem.product?.currency || currency) === 'USDT' ? 'USDC' : (cartItem.currency || cartItem.product?.currency || currency),
         status: 'ordered',
         productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
         productName: cartItem.product.name
@@ -1867,7 +1867,7 @@ const processUSDTWalletPayment = async (req, res) => {
       user: req.user.id,
       amount: totalAmount,
       currency,
-      method: 'usdt_wallet',
+      method: 'usdc_wallet',
       status: 'completed',
       paymentDate: new Date(),
       walletAddress: req.user.walletAddress
@@ -1919,16 +1919,16 @@ const processUSDTWalletPayment = async (req, res) => {
       paymentMethod: orderObj.paymentMethod,
       createdAt: orderObj.createdAt,
       orderId: orderObj._id,
-      message: 'USDT payment processed successfully'
+      message: 'USDC payment processed successfully'
     });
 
   } catch (error) {
-    console.error('USDT wallet payment error:', error);
+    console.error('USDC wallet payment error:', error);
 
-    // If USDT wallet payment fails, suggest fallback to wallet debit
+    // If USDC wallet payment fails, suggest fallback to wallet debit
     if (error.message.includes('wallet') || error.message.includes('balance') || error.message.includes('Insufficient')) {
       return res.status(400).json({
-        msg: 'USDT wallet payment failed. Please try wallet debit method.',
+        msg: 'USDC wallet payment failed. Please try wallet debit method.',
         fallback: 'wallet_debit',
         error: error.message
       });
@@ -1950,7 +1950,7 @@ const createCryptoPaymentOrder = async (req, res) => {
     const {
       deliveryMethodId,
       shippingAddressId,
-      currency = 'USDT',
+      currency = 'USDC',
       orderCurrency, // Native currency for order calculations (USD for non-NGN, NGN for NGN)
       notes = '',
       network = 'base', // base, ethereum, polygon, bsc
@@ -2000,10 +2000,10 @@ const createCryptoPaymentOrder = async (req, res) => {
           itemPrice = item.product.price / 1500; // NGN to USD
         } else if (productCurrency === 'USD' && orderCalcCurrency === 'NGN') {
           itemPrice = item.product.price * 1500; // USD to NGN
-        } else if (productCurrency === 'USDT' && orderCalcCurrency === 'USD') {
-          itemPrice = item.product.price; // USDT = USD (1:1)
-        } else if (productCurrency === 'USD' && orderCalcCurrency === 'USDT') {
-          itemPrice = item.product.price; // USD = USDT (1:1)
+        } else if (productCurrency === 'USDC' && orderCalcCurrency === 'USD') {
+          itemPrice = item.product.price; // USDC = USD (1:1)
+        } else if (productCurrency === 'USD' && orderCalcCurrency === 'USDC') {
+          itemPrice = item.product.price; // USD = USDC (1:1)
         }
         // Add more conversions as needed
       }
@@ -2034,14 +2034,14 @@ const createCryptoPaymentOrder = async (req, res) => {
     // Convert total from order currency to payment currency if different
     let totalAmount = totalAmountInOrderCurrency;
     if (orderCalcCurrency !== currency) {
-      if (orderCalcCurrency === 'USD' && currency === 'USDT') {
-        totalAmount = totalAmountInOrderCurrency; // USD = USDT (1:1)
+      if (orderCalcCurrency === 'USD' && currency === 'USDC') {
+        totalAmount = totalAmountInOrderCurrency; // USD = USDC (1:1)
       } else if (orderCalcCurrency === 'USD' && currency === 'NGN') {
         totalAmount = totalAmountInOrderCurrency * 1500; // USD to NGN
       } else if (orderCalcCurrency === 'NGN' && currency === 'USD') {
         totalAmount = totalAmountInOrderCurrency / 1500; // NGN to USD
-      } else if (orderCalcCurrency === 'NGN' && currency === 'USDT') {
-        totalAmount = totalAmountInOrderCurrency / 1500; // NGN to USDT
+      } else if (orderCalcCurrency === 'NGN' && currency === 'USDC') {
+        totalAmount = totalAmountInOrderCurrency / 1500; // NGN to USDC
       }
       // Add more conversions as needed
     }
@@ -2149,7 +2149,7 @@ const createCryptoPaymentOrder = async (req, res) => {
     order.paymentExpiry = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
     await order.save({ session });
 
-    // Create order items
+    // Create order items (map USDT to USDC - enum only allows USDC)
     const orderItems = [];
     for (const cartItem of activeItems) {
       let variantData = undefined;
@@ -2162,6 +2162,8 @@ const createCryptoPaymentOrder = async (req, res) => {
         };
       }
 
+      const rawCurrency = cartItem.currency || cartItem.product?.currency || currency;
+      const itemCurrency = rawCurrency === 'USDT' ? 'USDC' : rawCurrency;
       const orderItemData = {
         order: order._id,
         product: cartItem.product._id,
@@ -2169,7 +2171,7 @@ const createCryptoPaymentOrder = async (req, res) => {
         quantity: cartItem.quantity,
         unitPrice: cartItem.unitPrice || cartItem.product.price,
         totalPrice: (cartItem.unitPrice || cartItem.product.price) * cartItem.quantity,
-        currency: cartItem.currency || currency,
+        currency: itemCurrency,
         status: 'ordered',
         productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
         productName: cartItem.product.name
@@ -2261,7 +2263,8 @@ const createCryptoPaymentOrder = async (req, res) => {
         } catch (error) {
           console.error('Error processing payment callback:', error);
         }
-      }
+      },
+      currency
     );
 
     await session.commitTransaction();
@@ -2338,7 +2341,8 @@ const checkCryptoPaymentStatus = async (req, res) => {
     const blockchainPaymentService = require('../services/blockchainPaymentService');
     const paymentReceived = await blockchainPaymentService.checkPaymentReceived(
       order.paymentAddress,
-      order.totalAmount
+      order.totalAmount,
+      order.currency || 'USDC'
     );
 
     if (paymentReceived) {
@@ -2385,6 +2389,121 @@ const checkCryptoPaymentStatus = async (req, res) => {
   }
 };
 
+// @desc    Confirm crypto payment (check + sweep + confirm order) - called when user clicks "I have made payment"
+// @route   POST /api/orders/:orderId/confirm-crypto-payment
+// @access  Private
+const confirmCryptoPayment = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await Order.findById(orderId).populate('buyer');
+    if (!order) {
+      return res.status(404).json({ msg: 'Order not found' });
+    }
+
+    const buyerId = (order.buyer._id || order.buyer).toString();
+    if (buyerId !== req.user.id) {
+      return res.status(403).json({ msg: 'Unauthorized' });
+    }
+
+    if (order.paymentStatus === 'paid') {
+      return res.json({
+        success: true,
+        status: 'paid',
+        message: 'Order already confirmed',
+        orderStatus: order.status
+      });
+    }
+
+    if (order.paymentMethod !== 'crypto' || !order.paymentAddress) {
+      return res.status(400).json({ msg: 'Not a crypto order or no payment address' });
+    }
+
+    const blockchainPaymentService = require('../services/blockchainPaymentService');
+    const paymentReceived = await blockchainPaymentService.checkPaymentReceived(
+      order.paymentAddress,
+      order.totalAmount,
+      order.currency || 'USDC'
+    );
+
+    if (!paymentReceived) {
+      return res.status(400).json({
+        success: false,
+        msg: 'Payment not detected',
+        paymentReceived: false
+      });
+    }
+
+    // Payment detected: sweep, confirm, process
+    const buyer = await User.findById(order.buyer._id || order.buyer).select('cryptoPaymentAddress');
+    const isUserTied = buyer?.cryptoPaymentAddress && buyer.cryptoPaymentAddress === order.paymentAddress;
+    const sweepOptions = isUserTied ? { buyerId: (order.buyer._id || order.buyer).toString() } : {};
+
+    const payResult = await blockchainPaymentService.payFromWallet(order._id.toString(), order.currency || 'USDC', sweepOptions);
+
+    if (!payResult.success) {
+      return res.status(500).json({
+        success: false,
+        msg: payResult.message || 'Failed to sweep funds'
+      });
+    }
+
+    order.paymentStatus = 'paid';
+    order.status = 'confirmed';
+    order.paymentTransactionHash = payResult.transactionHash;
+    order.paymentConfirmations = 3;
+    order.fundsSwept = true;
+    order.fundsSweptAt = new Date();
+    order.fundsSweptTxHash = payResult.transactionHash;
+    await order.save();
+
+    const existingPayment = await Payment.findOne({ order: order._id });
+    if (!existingPayment) {
+      const payment = new Payment({
+        order: order._id,
+        user: order.buyer._id || order.buyer,
+        amount: order.totalAmount,
+        currency: order.currency,
+        method: 'crypto',
+        status: 'completed',
+        paymentDate: new Date(),
+        transactionHash: payResult.transactionHash
+      });
+      await payment.save();
+    }
+
+    const userCart = await Cart.findOne({ user: order.buyer._id || order.buyer });
+    if (userCart) {
+      userCart.items = userCart.items.map(item => {
+        const itemObj = item.toObject ? item.toObject() : item;
+        itemObj.status = 'ordered';
+        return itemObj;
+      });
+      await userCart.save();
+    }
+
+    const buyerUser = await User.findById(order.buyer._id || order.buyer);
+    if (buyerUser && buyerUser.referredBy) {
+      await awardReferralBonus(buyerUser._id, order.totalAmount);
+    }
+
+    await reduceStockOnOrder(order);
+
+    const transactionMonitor = require('../services/transactionMonitor');
+    transactionMonitor.stopMonitoring(order._id.toString());
+
+    return res.json({
+      success: true,
+      status: 'paid',
+      orderStatus: 'confirmed',
+      transactionHash: payResult.transactionHash
+    });
+  } catch (error) {
+    console.error('Error confirming crypto payment:', error);
+    res.status(500).json({ msg: 'Error confirming payment', error: error.message });
+  }
+};
+
 module.exports = {
   createOrder,
   checkoutFromCart,
@@ -2395,9 +2514,10 @@ module.exports = {
   getOrderByNumber,
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
-  processUSDTWalletPayment,
+  processUSDCWalletPayment,
   createCryptoPaymentOrder,
   checkCryptoPaymentStatus,
+  confirmCryptoPayment,
   updateOrderStatus,
   cancelOrder,
   adminListOrders,

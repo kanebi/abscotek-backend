@@ -122,7 +122,7 @@ router.get('/profile/stats', auth, async (req, res) => {
       balance: user.balance || 0,
       orderCount: orderCount || 0,
       totalReferrals: totalReferrals || 0,
-      currency: user.preferences?.currency || 'USDT'
+      currency: user.preferences?.currency || 'USDC'
     });
   } catch (err) {
     console.error('Error in /profile/stats:', err);
@@ -156,7 +156,7 @@ router.get('/crypto-payment-address', auth, async (req, res) => {
   }
 });
 
-// @desc    Get user wallet USDT balance (blockchain)
+// @desc    Get user wallet USDC balance (blockchain)
 // @route   GET api/users/wallet-balance
 // @access  Private
 router.get('/wallet-balance', auth, async (req, res) => {
@@ -165,7 +165,7 @@ router.get('/wallet-balance', auth, async (req, res) => {
     if (!user || !user.walletAddress) {
       return res.json({ balance: '0', address: null });
     }
-    const balance = await blockchainPaymentService.getUSDTBalance(user.walletAddress);
+    const balance = await blockchainPaymentService.getUSDCBalance(user.walletAddress);
     return res.json({ balance: String(balance), address: user.walletAddress });
   } catch (err) {
     console.error('Error fetching wallet balance:', err);
@@ -196,7 +196,7 @@ router.put('/preferences', auth, async (req, res) => {
 
     // Update currency preference
     if (currency) {
-      const validCurrencies = ['USDT', 'USD', 'NGN', 'EUR'];
+      const validCurrencies = ['USDC', 'USD', 'NGN', 'EUR'];
       if (!validCurrencies.includes(currency)) {
         return res.status(400).json({
           msg: `Invalid currency. Valid options are: ${validCurrencies.join(', ')}`

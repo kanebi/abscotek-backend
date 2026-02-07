@@ -121,7 +121,7 @@ const getCart = async (req, res) => {
     if (!cart) {
       cart = new Cart({
         user: req.user.id,
-        currency: 'USDT',
+        currency: 'USDC',
         subtotal: 0,
         total: 0,
         items: []
@@ -216,7 +216,7 @@ const addItemToCart = async (req, res) => {
     if (!cart) {
       cart = new Cart({
         user: req.user.id,
-        currency: currency || 'USDT',
+        currency: currency || 'USDC',
         subtotal: 0,
         total: 0
       });
@@ -232,7 +232,7 @@ const addItemToCart = async (req, res) => {
     const variant = variantName ? product.variants?.find(v => v.name === variantName) : null;
     // Use variant price if available, otherwise use product price
     const finalPrice = variant?.price || product.price;
-    const finalCurrency = variant?.currency || product.currency || currency || 'USDT';
+    const finalCurrency = variant?.currency || product.currency || currency || 'USDC';
 
     // Check for existing item with same product, variant, and specs
     const itemIndex = cart.items.findIndex(
@@ -281,7 +281,7 @@ const addItemToCart = async (req, res) => {
     cart.total = cart.subtotal + (cart.deliveryFee || 0) - (cart.discount || 0);
 
     // Ensure cart has required fields
-    if (!cart.currency) cart.currency = currency || 'USDT';
+    if (!cart.currency) cart.currency = currency || 'USDC';
 
     await cart.save();
     await cart.populate('items.product', 'name price images firstImage');

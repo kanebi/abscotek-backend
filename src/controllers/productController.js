@@ -39,7 +39,7 @@ const createProduct = async (req, res) => {
       name,
       description = '',
       price,
-      currency = 'USDT',
+      currency = 'USDC',
       images = [],
       badge = null,
       category = null,

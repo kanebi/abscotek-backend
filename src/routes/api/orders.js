@@ -13,9 +13,10 @@ const {
   cancelOrder,
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
-  processUSDTWalletPayment,
+  processUSDCWalletPayment,
   createCryptoPaymentOrder,
   checkCryptoPaymentStatus,
+  confirmCryptoPayment,
 } = require('../../controllers/orderController');
 
 /**
@@ -68,7 +69,7 @@ const {
  *                 description: ID of the delivery method
  *               currency:
  *                 type: string
- *                 enum: [USDT, USD, NGN, EUR]
+ *                 enum: [USDC, USD, NGN, EUR]
  *                 description: Order currency
  *               notes:
  *                 type: string
@@ -112,7 +113,7 @@ const {
  *                   description: Total order amount
  *                 currency:
  *                   type: string
- *                   enum: [USDT, USD, NGN, EUR]
+ *                   enum: [USDC, USD, NGN, EUR]
  *                   description: Order currency
  *                 status:
  *                   type: string
@@ -173,7 +174,7 @@ router.post(
  *                 description: ID of the shipping address
  *               currency:
  *                 type: string
- *                 enum: [USDT, USD, NGN, EUR]
+ *                 enum: [USDC, USD, NGN, EUR]
  *                 description: Order currency
  *               notes:
  *                 type: string
@@ -217,7 +218,7 @@ router.post(
  *                   description: Total order amount
  *                 currency:
  *                   type: string
- *                   enum: [USDT, USD, NGN, EUR]
+ *                   enum: [USDC, USD, NGN, EUR]
  *                   description: Order currency
  *                 status:
  *                   type: string
@@ -375,9 +376,10 @@ router.get('/:id', auth, getOrderById);
 router.get('/by-number/:orderNumber', auth, getOrderByNumber);
 router.get('/by-reference/:reference', auth, getOrderByPaystackReference);
 router.post('/verify-payment', auth, verifyPaymentAndCreateOrder);
-router.post('/usdt-payment', auth, processUSDTWalletPayment);
+router.post('/usdc-payment', auth, processUSDCWalletPayment);
 router.post('/create-crypto-payment', auth, createCryptoPaymentOrder);
 router.get('/:orderId/crypto-payment-status', auth, checkCryptoPaymentStatus);
+router.post('/:orderId/confirm-crypto-payment', auth, confirmCryptoPayment);
 
 /**
  * @swagger
