@@ -6,6 +6,7 @@ const {
   createOrder,
   checkoutFromCart,
   handlePaystackWebhook,
+  handleSeerbitCallback,
   getOrders,
   getOrderById,
   getOrderByNumber,
@@ -372,6 +373,7 @@ router.get('/paginated', auth, require('../../controllers/orderController').getO
  *       500:
  *         description: Server error
  */
+router.get('/seerbit/callback', handleSeerbitCallback);
 router.get('/:id', auth, getOrderById);
 router.get('/by-number/:orderNumber', auth, getOrderByNumber);
 router.get('/by-reference/:reference', auth, getOrderByPaystackReference);

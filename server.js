@@ -1,12 +1,16 @@
-require('dotenv').config();
+const path = require('path');
+// Load .env from backend directory so FRONTEND_URL etc. are always read (even when run from project root)
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
+const session = require('express-session');
 const cors = require('cors');
 const connectDB = require('./src/config/db');
 const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./src/config/swagger');
 const { devLogger, requestLogger, errorLogger, captureResponseBody } = require('./src/middleware/logger');
-const path = require('path');
 const { LOCAL_DIR } = require('./src/config/storage');
+const auth = require('./src/middleware/auth');
+const currencySession = require('./src/middleware/currencySession');
 
 const app = express();
 
@@ -24,6 +28,7 @@ require('./src/models/DeliveryMethod');
 require('./src/models/Wishlist');
 require('./src/models/Referral');
 require('./src/models/UserVerification');
+require('./src/models/CurrencyExchangeRate');
 
 // Ensure DB indexes are correct (partial unique, text, etc.)
 const { ensureIndexes } = require('./src/config/ensureIndexes');
@@ -31,7 +36,17 @@ ensureIndexes().catch(() => {});
 
 // Init Middleware
 app.use(express.json({ extended: false }));
-app.use(cors());
+app.use(cors({ credentials: true, origin: true })); // allow credentials for session cookie
+
+// Session: 24h TTL for currency (and future session data)
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+app.use(session({
+  secret: process.env.SESSION_SECRET || process.env.JWT_SECRET || 'currency-session-secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' },
+  name: 'abscotek.sid'
+}));
 
 // Note: Webhook routes handle their own body parsing with signature verification
 // See backend/src/routes/api/webhooks.js for details
@@ -58,7 +73,33 @@ app.get('/', (req, res) => {
   res.send('API Running');
 });
 
+// Single fallback: when /checkout/success hits the backend, redirect to frontend (avoid redirect loop if FRONTEND_URL points to backend)
+app.get('/checkout/success', (req, res) => {
+  const frontendUrl = (process.env.FRONTEND_URL || '').trim().replace(/\/$/, '');
+  const currentOrigin = `${req.protocol}://${req.get('host')}`;
+  if (!frontendUrl) {
+    res.status(400).set('Content-Type', 'text/plain').send(
+      'Set FRONTEND_URL in backend .env to your frontend origin (e.g. http://localhost:5173 for Vite).'
+    );
+    return;
+  }
+  if (frontendUrl === currentOrigin) {
+    res.status(400).set('Content-Type', 'text/plain').send(
+      'FRONTEND_URL must be your frontend app URL (e.g. http://localhost:5173), not the backend (e.g. 5832). Fix backend/.env and restart.'
+    );
+    return;
+  }
+  const qs = new URLSearchParams(req.query).toString();
+  const url = qs ? `${frontendUrl}/checkout/success?${qs}` : `${frontendUrl}/checkout/success`;
+  res.redirect(302, url);
+});
+
+// API: optional auth + currency session (X-User-Currency header, 24h cache)
+app.use('/api', auth.optional);
+app.use('/api', currencySession);
+
 // Define Routes
+app.use('/api/currency', require('./src/routes/api/currency'));
 app.use('/api/users', require('./src/routes/api/users'));
 app.use('/api/auth', require('./src/routes/api/auth'));
 app.use('/api/admin', require('./src/routes/api/adminAuth'));

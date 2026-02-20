@@ -8,12 +8,14 @@ const blockchainPaymentService = require('../services/blockchainPaymentService')
  * Runs every 2 minutes to sweep funds from payment addresses to main wallet
  */
 const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
+  const runAt = new Date().toISOString();
+  console.log(`[FundSweeper] Cron run at ${runAt}`);
   try {
     // Get main wallet address from environment
     const mainWalletAddress = process.env.MAIN_WALLET_ADDRESS;
     
     if (!mainWalletAddress) {
-      console.warn('MAIN_WALLET_ADDRESS not set in environment. Skipping fund sweep.');
+      console.warn('[FundSweeper] MAIN_WALLET_ADDRESS not set in environment. Skipping fund sweep.');
       return;
     }
 
@@ -26,10 +28,11 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
     }).select('_id buyer paymentAddress totalAmount currency');
 
     if (ordersToSweep.length === 0) {
-      return; // No orders to sweep
+      console.log('[FundSweeper] No orders to sweep.');
+      return;
     }
 
-    console.log(`Found ${ordersToSweep.length} orders to sweep funds from...`);
+    console.log(`[FundSweeper] Found ${ordersToSweep.length} order(s) to sweep`);
 
     for (const order of ordersToSweep) {
       try {
@@ -48,16 +51,16 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
             if (nativeBalance === 0n) {
               order.fundsSwept = true;
               await order.save();
-              console.log(`Order ${orderId}: No USDC or native token to sweep`);
+              console.log(`[FundSweeper] Order ${orderId}: No USDC or native token to sweep`);
               continue;
             }
           }
 
-          console.log(`Order ${orderId}: Sweeping ${tokenBalance} USDC from ${order.paymentAddress}...`);
+          console.log(`[FundSweeper] Order ${orderId}: Sweeping ${tokenBalance} USDC from ${order.paymentAddress}...`);
 
-          const buyer = await User.findById(order.buyer).select('cryptoPaymentAddress');
-          const isUserTied = buyer?.cryptoPaymentAddress && buyer.cryptoPaymentAddress === order.paymentAddress;
-          const sweepOptions = isUserTied ? { buyerId: order.buyer.toString() } : {};
+          // Orders always use user-tied payment addresses (generatePaymentAddressForUser), so always pass buyerId for sweep
+          const buyerId = (order.buyer._id || order.buyer).toString();
+          const sweepOptions = { buyerId };
           const result = await blockchainPaymentService.payFromWallet(orderId, currency, sweepOptions);
 
           if (result.success) {
@@ -66,13 +69,12 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
             order.fundsSweptTxHash = result.transactionHash;
             await order.save();
 
-            console.log(`Order ${orderId}: Successfully swept ${result.amount} USDC`);
-            console.log(`Transaction: ${result.transactionHash}`);
+            console.log(`[FundSweeper] Order ${orderId}: Successfully swept ${result.amount} USDC. Tx: ${result.transactionHash}`);
           } else {
-            console.log(`Order ${orderId}: ${result.message}`);
+            console.log(`[FundSweeper] Order ${orderId}: ${result.message}`);
             if (result.message && result.message.includes('Insufficient native token')) {
               // Don't mark as swept yet - might get native token later for gas
-              console.log(`Order ${orderId}: Waiting for native token to cover gas fees`);
+              console.log(`[FundSweeper] Order ${orderId}: Waiting for native token to cover gas fees`);
             } else {
               // Other error, mark as swept
               order.fundsSwept = true;
@@ -89,15 +91,14 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
             // No funds, mark as swept to avoid checking again
             order.fundsSwept = true;
             await order.save();
-            console.log(`Order ${orderId}: No native token to sweep`);
+            console.log(`[FundSweeper] Order ${orderId}: No native token to sweep`);
             continue;
           }
 
-          console.log(`Order ${orderId}: Sweeping ${balance} ${currency} (native) from ${order.paymentAddress}...`);
+          console.log(`[FundSweeper] Order ${orderId}: Sweeping ${balance} ${currency} (native) from ${order.paymentAddress}...`);
 
-          const buyer = await User.findById(order.buyer).select('cryptoPaymentAddress');
-          const isUserTied = buyer?.cryptoPaymentAddress && buyer.cryptoPaymentAddress === order.paymentAddress;
-          const sweepOptions = isUserTied ? { buyerId: order.buyer.toString() } : {};
+          const buyerId = (order.buyer._id || order.buyer).toString();
+          const sweepOptions = { buyerId };
           const result = await blockchainPaymentService.payFromWallet(orderId, currency, sweepOptions);
 
           if (result.success) {
@@ -107,10 +108,9 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
             order.fundsSweptTxHash = result.transactionHash;
             await order.save();
 
-            console.log(`Order ${orderId}: Successfully swept ${result.amount} ${currency}`);
-            console.log(`Transaction: ${result.transactionHash}`);
+            console.log(`[FundSweeper] Order ${orderId}: Successfully swept ${result.amount} ${currency}. Tx: ${result.transactionHash}`);
           } else {
-            console.log(`Order ${orderId}: ${result.message}`);
+            console.log(`[FundSweeper] Order ${orderId}: ${result.message}`);
             if (result.message === 'Insufficient funds to cover gas fees') {
               // Mark as swept if insufficient for gas (likely dust)
               order.fundsSwept = true;
@@ -120,7 +120,7 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
           }
         }
       } catch (error) {
-        console.error(`Error sweeping funds for order ${order._id}:`, error);
+        console.error(`[FundSweeper] Error sweeping order ${order._id}:`, error.message);
         
         // If it's a known error (like already swept), mark it
         if (error.message && error.message.includes('already been swept')) {
@@ -129,8 +129,9 @@ const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
         }
       }
     }
+    console.log(`[FundSweeper] Cron run finished at ${new Date().toISOString()}`);
   } catch (error) {
-    console.error('Error in fund sweeper job:', error);
+    console.error('[FundSweeper] Job error:', error);
   }
 }, {
   scheduled: false // Don't start automatically

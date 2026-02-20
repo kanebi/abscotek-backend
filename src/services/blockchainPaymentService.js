@@ -288,6 +288,15 @@ class BlockchainPaymentService {
   }
 
   /**
+   * Round amount to token decimals to avoid "too many decimals" parseUnits error.
+   * USDC uses 6 decimals; floating point math can produce values like 63.333333333333336.
+   */
+  _roundForTokenDecimals(amount, decimals = 6) {
+    const factor = 10 ** decimals;
+    return (Math.floor(Number(amount) * factor) / factor).toFixed(decimals);
+  }
+
+  /**
    * Check if address received token payment (USDC)
    */
   async checkTokenPaymentReceived(address, expectedAmount, token = 'USDC') {
@@ -296,8 +305,7 @@ class BlockchainPaymentService {
       const tokenContract = this.getUSDCContractAddress();
       const tokenContractObj = new ethers.Contract(tokenContract, this.erc20ABI, this.provider);
       const decimals = await tokenContractObj.decimals();
-      // Round to token decimals to avoid "too many decimals" (e.g. 63.333333333333336 with USDC 6 decimals)
-      const roundedAmount = Number(expectedAmount).toFixed(Number(decimals));
+      const roundedAmount = this._roundForTokenDecimals(expectedAmount, decimals);
       const expectedRaw = ethers.parseUnits(roundedAmount, decimals);
       const tolerance = expectedRaw / 1000n;
       const minAmount = expectedRaw - tolerance;

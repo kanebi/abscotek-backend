@@ -24,8 +24,12 @@ const PaymentSchema = new mongoose.Schema({
   },
   method: {
     type: String,
-    enum: ['wallet', 'paystack', 'bank_transfer', 'crypto'],
+    enum: ['wallet', 'paystack', 'seerbit', 'bank_transfer', 'crypto'],
     required: true
+  },
+  seerbitReference: {
+    type: String,
+    sparse: true
   },
   status: {
     type: String,

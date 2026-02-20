@@ -98,7 +98,23 @@ const CartSchema = new mongoose.Schema({
   }
 });
 
+// Normalize USDT → USDC (enum only allows USDC)
+function normalizeCurrency(doc) {
+  if (doc.currency === 'USDT') doc.currency = 'USDC';
+  if (doc.items && Array.isArray(doc.items)) {
+    doc.items.forEach((item) => {
+      if (item.currency === 'USDT') item.currency = 'USDC';
+    });
+  }
+}
+
+CartSchema.pre('validate', function(next) {
+  normalizeCurrency(this);
+  next();
+});
+
 CartSchema.pre('save', function(next) {
+  normalizeCurrency(this);
   this.updatedAt = new Date();
   next();
 });

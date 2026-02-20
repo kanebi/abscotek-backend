@@ -136,7 +136,7 @@ const OrderSchema = new mongoose.Schema({
   status: {
     type: String,
     required: true,
-    enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
+    enum: ['pending', 'pending_payment', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
     default: 'pending'
   },
   currentStage: {
@@ -176,8 +176,23 @@ const OrderSchema = new mongoose.Schema({
   // Crypto payment fields
   paymentMethod: {
     type: String,
-    enum: ['wallet', 'paystack', 'crypto', 'card'],
+    enum: ['wallet', 'paystack', 'seerbit', 'crypto', 'card'],
     default: 'wallet'
+  },
+  paymentReference: {
+    type: String,
+    sparse: true,
+    default: null
+  },
+  paystackReference: {
+    type: String,
+    sparse: true,
+    default: null
+  },
+  seerbitReference: {
+    type: String,
+    sparse: true,
+    default: null
   },
   paymentAddress: {
     type: String,

@@ -8,6 +8,7 @@ const { awardReferralBonus } = require('./referralController');
 const User = require('../models/User');
 const PaystackService = require('../services/paystackService');
 const Paystack = require('paystack-api')(process.env.PAYSTACK_SECRET_KEY);
+const seerbitService = require('../services/seerbitService');
 const { reduceStockOnOrder } = require('../utils/stockAnalysis');
 
 // @desc    Create an order (direct)
@@ -151,21 +152,22 @@ const checkoutFromCart = async (req, res) => {
 
     const products = activeItems.map((item) => ({ productId: item.product._id.toString(), quantity: item.quantity }));
 
-    // Calculate total amount - convert all prices to order currency before summing
-    let subTotalUSD = 0;
+    // NGN/USD rate for conversion (keep in sync with frontend/SeerBit)
+    const NGN_PER_USD = 1500;
+
+    // Calculate total amount - all values in order currency (no mixing USD and NGN)
+    let subTotalInOrderCurrency = 0;
     for (const item of activeItems) {
-      // Convert item price to order currency if different
-      let itemPrice = item.product.price;
-      if (item.product.currency && item.product.currency !== currency) {
-        // For now, assume USDC/USD are 1:1, and NGN conversion
-        if (item.product.currency === 'NGN' && currency === 'USDC') {
-          itemPrice = item.product.price / 1500; // Convert NGN to USDC
-        } else if (item.product.currency === 'USDC' && currency === 'NGN') {
-          itemPrice = item.product.price * 1500; // Convert USDC to NGN
+      const productCurrency = item.product.currency === 'USDT' ? 'USDC' : (item.product.currency || 'USDC');
+      let itemPriceInOrderCurrency = item.product.price;
+      if (productCurrency !== currency) {
+        if (productCurrency === 'NGN' && (currency === 'USDC' || currency === 'USD')) {
+          itemPriceInOrderCurrency = item.product.price / NGN_PER_USD;
+        } else if ((productCurrency === 'USDC' || productCurrency === 'USD') && currency === 'NGN') {
+          itemPriceInOrderCurrency = item.product.price * NGN_PER_USD;
         }
-        // Add more conversion logic as needed for other currencies
       }
-      subTotalUSD += itemPrice * item.quantity;
+      subTotalInOrderCurrency += itemPriceInOrderCurrency * item.quantity;
     }
 
     // Get delivery method
@@ -174,7 +176,17 @@ const checkoutFromCart = async (req, res) => {
       return res.status(400).json({ msg: 'Invalid delivery method' });
     }
 
-    const totalAmount = subTotalUSD + deliveryMethod.price;
+    // Convert delivery fee to order currency so totalAmount is in one currency
+    let deliveryFeeInOrderCurrency = deliveryMethod.price;
+    const dmCurrency = deliveryMethod.currency || 'USD';
+    if (dmCurrency !== currency) {
+      if (dmCurrency === 'NGN' && (currency === 'USDC' || currency === 'USD')) {
+        deliveryFeeInOrderCurrency = deliveryMethod.price / NGN_PER_USD;
+      } else if ((dmCurrency === 'USDC' || dmCurrency === 'USD') && currency === 'NGN') {
+        deliveryFeeInOrderCurrency = deliveryMethod.price * NGN_PER_USD;
+      }
+    }
+    const totalAmount = subTotalInOrderCurrency + deliveryFeeInOrderCurrency;
 
     // Handle different payment methods
     if (paymentMethod === 'paystack') {
@@ -186,9 +198,9 @@ const checkoutFromCart = async (req, res) => {
           quantity: item.quantity,
           price: item.product.price
         })),
-        subTotal: subTotalUSD, // Use 'subTotal' as per schema
+        subTotal: subTotalInOrderCurrency,
         deliveryMethod: deliveryMethodId,
-        deliveryFee: deliveryMethod.price, // Use 'deliveryFee' as per schema
+        deliveryFee: deliveryFeeInOrderCurrency,
         totalAmount,
         status: 'pending_payment',
         paymentMethod: 'paystack',
@@ -235,6 +247,67 @@ const checkoutFromCart = async (req, res) => {
           reference: paystackReference
         },
         orderId: orderObj._id // Explicitly include orderId for frontend
+      });
+    } else if (paymentMethod === 'seerbit') {
+      // SeerBit Standard Checkout: create order, initialize payment, return redirect link
+      const orderData = {
+        buyer: req.user.id,
+        products: cart.items.map(item => ({
+          product: item.product._id,
+          quantity: item.quantity,
+          price: item.product.price
+        })),
+        subTotal: subTotalInOrderCurrency,
+        deliveryMethod: deliveryMethodId,
+        deliveryFee: deliveryFeeInOrderCurrency,
+        totalAmount,
+        status: 'pending',
+        paymentMethod: 'seerbit',
+        paymentStatus: 'unpaid',
+        currency,
+        notes,
+        shippingAddress: shippingAddressId || null
+      };
+      const order = new Order(orderData);
+      await order.save();
+
+      const seerbitReference = seerbitService.generateReference();
+      // totalAmount is already in order currency; SeerBit expects NGN in whole units
+      const amountInNGN = currency === 'NGN' ? totalAmount : totalAmount * NGN_PER_USD;
+      const amountForSeerbit = String(Math.round(amountInNGN));
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[SeerBit] amount', { subTotalInOrderCurrency, deliveryFeeInOrderCurrency, totalAmount, currency, amountInNGN, amountForSeerbit });
+      }
+      const callbackUrl = process.env.FRONTEND_URL
+        ? `${process.env.FRONTEND_URL.replace(/\/$/, '')}/checkout/success?reference=${encodeURIComponent(seerbitReference)}`
+        : `${req.protocol}://${req.get('host')}/api/orders/seerbit/callback?reference=${encodeURIComponent(seerbitReference)}`;
+
+      const seerbitResult = await seerbitService.initializePayment({
+        publicKey: process.env.SEERBIT_PUBLIC_KEY,
+        amount: amountForSeerbit,
+        currency: 'NGN',
+        country: 'NG',
+        paymentReference: seerbitReference,
+        email: req.user.email,
+        fullName: req.user.name || req.user.email,
+        callbackUrl
+      });
+
+      order.seerbitReference = seerbitReference;
+      order.paymentReference = seerbitReference;
+      order.status = 'pending';
+      await order.save();
+
+      const orderObj = order.toObject();
+      orderObj._id = orderObj._id.toString();
+
+      return res.json({
+        order: orderObj,
+        seerbitData: {
+          redirectLink: seerbitResult.redirectLink,
+          reference: seerbitReference
+        },
+        orderId: orderObj._id
       });
     } else if (paymentMethod === 'paystack') {
       // For Paystack payments, verify payment first, then create/update order
@@ -1170,7 +1243,11 @@ const getOrderByPaystackReference = async (req, res) => {
     const { reference } = req.params;
 
     const order = await Order.findOne({
-      paystackReference: reference,
+      $or: [
+        { paystackReference: reference },
+        { seerbitReference: reference },
+        { paymentReference: reference }
+      ],
       buyer: req.user.id // Ensure user owns this order
     })
       .populate({
@@ -1201,10 +1278,17 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
   session.startTransaction();
   let transactionCommitted = false;
 
+  const userId = (req.user && (req.user._id || req.user.id))?.toString?.() || req.user?.id;
+  if (!userId) {
+    session.endSession();
+    return res.status(401).json({ msg: 'Authentication required' });
+  }
+
   try {
     const {
       paymentMethod,
       paystackReference,
+      seerbitReference,
       deliveryMethodId,
       shippingAddressId,
       currency = 'USDC',
@@ -1212,14 +1296,134 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
     } = req.body;
 
     // Get user's cart
-    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price', 'images', 'currency', 'name']).session(session);
-    if (!cart || cart.items.length === 0) {
+    let cart = await Cart.findOne({ user: userId }).populate('items.product', ['price', 'images', 'currency', 'name']).session(session);
+    if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
       await session.abortTransaction();
       return res.status(400).json({ msg: 'Cart is empty' });
     }
 
     // Filter out ordered items - only process active items
-    const activeItems = cart.items.filter(item => item.status !== 'ordered');
+    let activeItems = cart.items.filter(item => item.status !== 'ordered');
+
+    // SeerBit: order was already created at checkout; find it and confirm with order items from cart
+    if (paymentMethod === 'seerbit' && seerbitReference) {
+      const refStr = typeof seerbitReference === 'string' ? seerbitReference : seerbitReference?.reference;
+      if (!refStr) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'SeerBit reference is required' });
+      }
+      const existingOrder = await Order.findOne({ seerbitReference: refStr, buyer: userId }).session(session);
+      if (!existingOrder) {
+        await session.abortTransaction();
+        return res.status(404).json({ msg: 'Order not found for this payment' });
+      }
+      // Verify payment status with SeerBit backend before confirming order
+      let seerbitVerification;
+      try {
+        seerbitVerification = await seerbitService.verifyPayment(refStr);
+      } catch (err) {
+        await session.abortTransaction();
+        return res.status(502).json({ msg: 'Could not verify payment with SeerBit', error: err.message });
+      }
+      if (!seerbitVerification || !seerbitVerification.success) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: seerbitVerification?.message || 'Payment not confirmed by SeerBit' });
+      }
+      if (activeItems.length === 0) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'No active items in cart' });
+      }
+      const orderCurrency = existingOrder.currency || 'NGN';
+      const orderItems = [];
+      for (const cartItem of activeItems) {
+        const product = cartItem.product;
+        const productId = product && (product._id || product);
+        if (!productId) continue;
+        let variantData;
+        if (cartItem.variant && typeof cartItem.variant === 'object') {
+          variantData = {
+            variantId: cartItem.variant._id || cartItem.variant.variantId || null,
+            name: cartItem.variant.name || null,
+            attributes: cartItem.variant.attributes || [],
+            additionalPrice: cartItem.variant.additionalPrice || cartItem.variant.price || 0
+          };
+        }
+        const unitPrice = cartItem.unitPrice ?? (product && product.price);
+        const totalPrice = (unitPrice || 0) * (cartItem.quantity || 0);
+        const orderItemData = {
+          order: existingOrder._id,
+          product: productId,
+          specs: cartItem.specs && Array.isArray(cartItem.specs) ? cartItem.specs : [],
+          quantity: cartItem.quantity,
+          unitPrice: unitPrice || 0,
+          totalPrice,
+          currency: (cartItem.currency || product?.currency || orderCurrency) === 'USDT' ? 'USDC' : (cartItem.currency || product?.currency || orderCurrency),
+          status: 'ordered',
+          productImage: (product && product.images && product.images.length > 0) ? product.images[0] : '/images/desktop-1.png',
+          productName: (product && product.name) || ''
+        };
+        if (variantData) orderItemData.variant = variantData;
+        const orderItem = new OrderItem(orderItemData);
+        await orderItem.save({ session });
+        orderItems.push(orderItem._id);
+      }
+      if (orderItems.length === 0) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'No valid cart items to confirm (missing product?)' });
+      }
+      existingOrder.items = orderItems;
+      existingOrder.status = 'confirmed';
+      existingOrder.paymentStatus = 'paid';
+      existingOrder.paymentReference = refStr;
+      await existingOrder.save({ session });
+
+      const payment = new Payment({
+        order: existingOrder._id,
+        user: req.user.id,
+        amount: existingOrder.totalAmount,
+        currency: existingOrder.currency,
+        method: 'seerbit',
+        status: 'completed',
+        paymentDate: new Date(),
+        reference: refStr,
+        seerbitReference: refStr
+      });
+      await payment.save({ session });
+      existingOrder.payments = [payment._id];
+      await existingOrder.save({ session });
+
+      const orderedProductIds = new Set(activeItems.map(a => (a.productId || (a.product && (a.product._id || a.product)))?.toString()).filter(Boolean));
+      cart.items = (cart.items || []).map(item => {
+        const itemObj = item.toObject ? item.toObject() : { ...item };
+        const pid = (item.productId || (item.product && (item.product._id || item.product)))?.toString();
+        if (pid && orderedProductIds.has(pid)) itemObj.status = 'ordered';
+        return itemObj;
+      });
+      await cart.save({ session });
+
+      if (req.user && req.user.referredBy) {
+        await awardReferralBonus(userId, existingOrder.totalAmount);
+      }
+
+      await session.commitTransaction();
+      transactionCommitted = true;
+
+      const orderObj = existingOrder.toObject();
+      orderObj._id = orderObj._id.toString();
+      return res.json({
+        _id: orderObj._id,
+        orderNumber: orderObj.orderNumber,
+        status: orderObj.status,
+        paymentStatus: orderObj.paymentStatus,
+        totalAmount: orderObj.totalAmount,
+        currency: orderObj.currency,
+        paymentMethod: orderObj.paymentMethod,
+        createdAt: orderObj.createdAt,
+        orderId: orderObj._id,
+        message: 'Order created and payment confirmed successfully'
+      });
+    }
+
     if (activeItems.length === 0) {
       await session.abortTransaction();
       return res.status(400).json({ msg: 'No active items in cart' });
@@ -1368,6 +1572,14 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
 
       paymentData.reference = referenceString;
       paymentData.paystackReference = referenceString;
+    } else if (paymentMethod === 'seerbit') {
+      const refStr = typeof seerbitReference === 'string' ? seerbitReference : seerbitReference?.reference;
+      if (!refStr) {
+        await session.abortTransaction();
+        return res.status(400).json({ msg: 'SeerBit reference is required' });
+      }
+      paymentData.reference = refStr;
+      paymentData.seerbitReference = refStr;
     } else if (paymentMethod === 'wallet') {
       paymentData.walletAddress = req.user.walletAddress;
     }
@@ -1417,12 +1629,13 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
 
   } catch (error) {
     if (!transactionCommitted) {
-      await session.abortTransaction();
+      try { await session.abortTransaction(); } catch (abortErr) { /* ignore */ }
     }
-    console.error('Payment verification error:', error);
-    res.status(500).json({ msg: 'Payment verification failed', error: error.message });
+    console.error('Payment verification error:', error?.message || error);
+    if (error?.stack) console.error(error.stack);
+    res.status(500).json({ msg: 'Payment verification failed', error: error?.message || 'Unknown error' });
   } finally {
-    session.endSession();
+    try { session.endSession(); } catch (e) { /* ignore */ }
   }
 };
 
@@ -2504,10 +2717,33 @@ const confirmCryptoPayment = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/orders/seerbit/callback
+ * SeerBit redirects here after payment (when callbackUrl is backend). No auth.
+ * Redirects user to frontend success page with ?reference= so frontend can call verify-payment.
+ */
+const handleSeerbitCallback = (req, res) => {
+  const raw = req.query.reference;
+  const reference = Array.isArray(raw) ? raw[0] : raw;
+  if (!reference) {
+    return res.status(400).send('Missing reference');
+  }
+  const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+  if (frontendUrl) {
+    const url = `${frontendUrl}/checkout/success?reference=${encodeURIComponent(reference)}`;
+    return res.redirect(302, url);
+  }
+  res.setHeader('Content-Type', 'text/html');
+  res.status(200).send(
+    `<!DOCTYPE html><html><head><title>Payment successful</title></head><body><p>Payment successful. Reference: ${reference}</p><p>Set FRONTEND_URL in backend .env and use that as callback URL so you are redirected to the app.</p></body></html>`
+  );
+};
+
 module.exports = {
   createOrder,
   checkoutFromCart,
   handlePaystackWebhook,
+  handleSeerbitCallback,
   getOrders,
   getOrdersPaginated,
   getOrderById,

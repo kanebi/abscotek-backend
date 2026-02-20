@@ -78,8 +78,19 @@ const extractUserInfo = async (req) => {
   return null;
 };
 
+// Optional auth: set req.user when token valid, never 401
+const optionalAuth = async function (req, res, next) {
+  try {
+    const user = await extractUserInfo(req);
+    if (user) req.user = user;
+    next();
+  } catch (err) {
+    next();
+  }
+};
+
 // Main authentication middleware
-module.exports = async function (req, res, next) {
+const auth = async function (req, res, next) {
   try {
     console.log('Auth middleware - checking authentication for:', req.path);
     console.log('Auth headers:', {
@@ -113,6 +124,10 @@ module.exports = async function (req, res, next) {
     });
   }
 };
+
+auth.optional = optionalAuth;
+
+module.exports = auth;
 
 // Admin authentication middleware
 module.exports.admin = async function (req, res, next) {
