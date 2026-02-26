@@ -130,7 +130,7 @@ console.log('✅ Payment verification job started');
 // Start fund sweeper job to sweep funds from payment addresses to main wallet
 const fundSweeperJob = require('./src/jobs/fundSweeperJob');
 fundSweeperJob.start();
-console.log('✅ Fund sweeper job started (runs every 2 minutes)');
+console.log('✅ Fund sweeper job started (runs every 3 minutes)');
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);

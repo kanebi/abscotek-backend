@@ -209,6 +209,62 @@ class BlockchainPaymentService {
   }
 
   /**
+   * Gas funder wallet used to send native token to payment addresses so sweeps can run.
+   * Customer sends USDC only; we fund gas from this wallet when needed.
+   * Uses GAS_FUNDER_PRIVATE_KEY, or falls back to ETHEREUM_PRIVATE_KEY / APECHAIN_PRIVATE_KEY.
+   */
+  getGasFunderWallet() {
+    const key =
+      process.env.GAS_FUNDER_PRIVATE_KEY ||
+      process.env.ETHEREUM_PRIVATE_KEY ||
+      process.env.APECHAIN_PRIVATE_KEY;
+    if (!key) return null;
+    return new ethers.Wallet(key, this.provider);
+  }
+
+  /**
+   * If payment address has insufficient native token for gas, send some from the gas funder.
+   * Enables "customer sends USDC only" — we pay gas from platform wallet.
+   * @param {string} paymentAddress - Address that needs native for gas
+   * @param {bigint} requiredWei - Minimum wei needed for the sweep tx
+   * @returns {Promise<{ funded: boolean, txHash?: string, message?: string }>}
+   */
+  async fundGasForAddress(paymentAddress, requiredWei) {
+    const current = await this.getBalanceWei(paymentAddress);
+    if (current >= requiredWei) return { funded: false };
+
+    const funder = this.getGasFunderWallet();
+    if (!funder) {
+      return { funded: false, message: 'No gas funder wallet (set GAS_FUNDER_PRIVATE_KEY or ETHEREUM_PRIVATE_KEY)' };
+    }
+
+    const bufferWei = (requiredWei * 20n) / 100n;
+    const amountToSend = requiredWei + bufferWei;
+    const feeData = await this.provider.getFeeData();
+    const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
+    const fundTxGas = 21000n;
+    const funderCost = fundTxGas * (gasPrice || 0n);
+    const funderBalance = await this.getBalanceWei(funder.address);
+    if (funderBalance <= funderCost + amountToSend) {
+      return { funded: false, message: `Gas funder has insufficient native token (need ${ethers.formatEther(funderCost + amountToSend)} for fund + sweep)` };
+    }
+
+    try {
+      const tx = await funder.sendTransaction({
+        to: paymentAddress,
+        value: amountToSend,
+        gasLimit: fundTxGas
+      });
+      const receipt = await tx.wait();
+      console.log(`[BlockchainPayment] Funded gas for ${paymentAddress}: ${ethers.formatEther(amountToSend)} native, tx ${tx.hash}`);
+      return { funded: true, txHash: tx.hash };
+    } catch (err) {
+      console.error('[BlockchainPayment] Gas fund failed:', err.message);
+      return { funded: false, message: err.message };
+    }
+  }
+
+  /**
    * Convert amount to wei (for native tokens like ETH, MATIC, BNB)
    */
   amountToWei(amount) {
@@ -292,8 +348,9 @@ class BlockchainPaymentService {
    * USDC uses 6 decimals; floating point math can produce values like 63.333333333333336.
    */
   _roundForTokenDecimals(amount, decimals = 6) {
-    const factor = 10 ** decimals;
-    return (Math.floor(Number(amount) * factor) / factor).toFixed(decimals);
+    const dec = Number(decimals);
+    const factor = 10 ** dec;
+    return (Math.floor(Number(amount) * factor) / factor).toFixed(dec);
   }
 
   /**
@@ -322,6 +379,40 @@ class BlockchainPaymentService {
       throw new Error(`USDC not supported on network: ${this.network}`);
     }
     return networkTokens.USDC;
+  }
+
+  /**
+   * Get the tx hash of the most recent incoming USDC transfer to an address (for recording on order).
+   * Uses Alchemy alchemy_getAssetTransfers when available; otherwise returns null.
+   * @param {string} address - Recipient address (payment address)
+   * @param {number} minAmount - Minimum expected amount (human-readable, e.g. 4.33)
+   * @returns {Promise<string|null>} Transaction hash or null
+   */
+  async getIncomingUSDCTransferTxHash(address, minAmount) {
+    try {
+      const usdcAddress = this.getUSDCContractAddress();
+      const params = {
+        toAddress: address,
+        category: ['erc20'],
+        contractAddresses: [usdcAddress],
+        maxCount: '0x14',
+        order: 'desc'
+      };
+      const res = await this.provider.send('alchemy_getAssetTransfers', [params]);
+      const transfers = res?.transfers || [];
+      const tolerance = Number(minAmount) * 0.001;
+      const minAllowed = Number(minAmount) - tolerance;
+      for (const t of transfers) {
+        const value = Number(t.value ?? 0);
+        if (value >= minAllowed && t.hash) {
+          return t.hash;
+        }
+      }
+      return null;
+    } catch (error) {
+      console.error('Error getting incoming USDC transfer tx hash:', error.message);
+      return null;
+    }
   }
 
   async getUSDCBalance(address) {
@@ -529,16 +620,22 @@ class BlockchainPaymentService {
       }
 
       const gasCost = (gasEstimate * gasPrice * 120n) / 100n;
-      const nativeBalance = await this.getBalanceWei(paymentAddress);
+      let nativeBalance = await this.getBalanceWei(paymentAddress);
 
       if (nativeBalance < gasCost) {
-        return {
-          success: false,
-          message: `Insufficient native token to cover gas fees for ${token} transfer`,
-          usdcBalance: balanceFormatted,
-          nativeBalance: ethers.formatEther(nativeBalance),
-          gasCost: ethers.formatEther(gasCost)
-        };
+        const fundResult = await this.fundGasForAddress(paymentAddress, gasCost);
+        if (fundResult.funded) {
+          nativeBalance = await this.getBalanceWei(paymentAddress);
+        }
+        if (nativeBalance < gasCost) {
+          return {
+            success: false,
+            message: fundResult.message || `Insufficient native token to cover gas fees for ${token} transfer`,
+            usdcBalance: balanceFormatted,
+            nativeBalance: ethers.formatEther(nativeBalance),
+            gasCost: ethers.formatEther(gasCost)
+          };
+        }
       }
 
       console.log(`Sweeping ${balanceFormatted} ${token} from ${paymentAddress} to ${mainWalletAddress}`);

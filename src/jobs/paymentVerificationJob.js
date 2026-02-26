@@ -1,4 +1,3 @@
-const cron = require('node-cron');
 const { Order } = require('../models/Order');
 const blockchainPaymentService = require('../services/blockchainPaymentService');
 const transactionMonitor = require('../services/transactionMonitor');
@@ -8,127 +7,122 @@ const User = require('../models/User');
 const { awardReferralBonus } = require('../controllers/referralController');
 const { reduceStockOnOrder } = require('../utils/stockAnalysis');
 
+const RUN_INTERVAL_MS = 30 * 1000; // 30 seconds
+
 /**
- * Payment Verification Job
- * Runs every minute to check for pending crypto payments
+ * Mark order as paid and run all side effects (Payment record, cart, referral, stock, stop monitoring).
+ * Called when payment is confirmed on-chain (amount or more in wallet). Sweeping is done separately by fundSweeperJob.
+ * Also used by POST /api/orders/:orderId/confirm-crypto-payment after manual confirm.
  */
-const paymentVerificationJob = cron.schedule('* * * * *', async () => {
+async function markOrderPaidAndComplete(order) {
+  order.paymentStatus = 'paid';
+  order.status = 'confirmed';
+  await order.save();
+
+  const existingPayment = await Payment.findOne({ order: order._id });
+  if (!existingPayment) {
+    const payment = new Payment({
+      order: order._id,
+      user: order.buyer._id || order.buyer,
+      amount: order.totalAmount,
+      currency: order.currency,
+      method: 'crypto',
+      status: 'completed',
+      paymentDate: new Date(),
+      transactionHash: order.paymentTransactionHash || order.fundsSweptTxHash
+    });
+    await payment.save();
+    order.payments = [payment._id];
+    await order.save();
+  }
+
+  const userCart = await Cart.findOne({ user: order.buyer._id || order.buyer });
+  if (userCart) {
+    userCart.items = userCart.items.map(item => {
+      const itemObj = item.toObject ? item.toObject() : item;
+      itemObj.status = 'ordered';
+      return itemObj;
+    });
+    await userCart.save();
+  }
+
+  const buyer = await User.findById(order.buyer._id || order.buyer);
+  if (buyer && buyer.referredBy) {
+    await awardReferralBonus(buyer._id, order.totalAmount);
+  }
+
+  await reduceStockOnOrder(order);
+  transactionMonitor.stopMonitoring(order._id.toString());
+
   try {
-    // Get all orders with pending crypto payments
+    const { sendOrderConfirmationEmail } = require('../email');
+    await sendOrderConfirmationEmail(order);
+  } catch (e) {
+    console.error('[PaymentVerification] Order confirmation email failed:', e.message);
+  }
+}
+
+/**
+ * Single run of payment verification (shared by cron and by confirmCryptoPayment flow).
+ * - Cancel order when unpaid and past expiry.
+ * - When payment found on-chain (amount or more in wallet): store tx hash, confirm order (mark paid). Does NOT sweep; sweeper job handles that.
+ */
+async function runPaymentVerification() {
+  try {
+    console.log(`[PaymentVerification] Run at ${new Date().toISOString()}`);
+
     const pendingOrders = await Order.find({
       paymentMethod: 'crypto',
       paymentStatus: 'unpaid',
-      paymentExpiry: { $gt: new Date() }, // Not expired
       paymentAddress: { $exists: true, $ne: null }
     }).populate('buyer');
 
     if (pendingOrders.length === 0) {
-      return; // No pending payments
+      console.log('[PaymentVerification] No pending crypto payments found.');
+      return;
     }
 
-    console.log(`Checking ${pendingOrders.length} pending crypto payments...`);
+    console.log(`[PaymentVerification] Checking ${pendingOrders.length} pending crypto payments...`);
 
     for (const order of pendingOrders) {
       try {
-        // Check if payment received
+        if (order.currency === 'USDT') {
+          order.currency = 'USDC';
+        }
+        const orderCurrency = order.currency || 'USDC';
+
         const paymentReceived = await blockchainPaymentService.checkPaymentReceived(
           order.paymentAddress,
           order.totalAmount,
-          order.currency || 'USDC'
+          orderCurrency
         );
 
         if (paymentReceived) {
-          // Get transaction confirmations
-          const confirmations = order.paymentTransactionHash
-            ? await blockchainPaymentService.getConfirmations(order.paymentTransactionHash)
-            : 0;
-
-          // Update confirmations
-          order.paymentConfirmations = confirmations;
-
-          // If we have enough confirmations, mark as paid
-          const requiredConfirmations = order.requiredConfirmations || 3;
-          if (confirmations >= requiredConfirmations) {
-            console.log(`Payment confirmed for order ${order._id} with ${confirmations} confirmations`);
-
-            // Update order status
-            order.paymentStatus = 'paid';
-            order.status = 'confirmed';
-            await order.save();
-
-            // Create payment record if not exists
-            const existingPayment = await Payment.findOne({ order: order._id });
-            if (!existingPayment) {
-              const payment = new Payment({
-                order: order._id,
-                user: order.buyer._id || order.buyer,
-                amount: order.totalAmount,
-                currency: order.currency,
-                method: 'crypto',
-                status: 'completed',
-                paymentDate: new Date(),
-                transactionHash: order.paymentTransactionHash
-              });
-              await payment.save();
-
-              // Update order with payment reference
-              order.payments = [payment._id];
+          if (!order.paymentTransactionHash) {
+            const txHash = await blockchainPaymentService.getIncomingUSDCTransferTxHash(
+              order.paymentAddress,
+              Number(order.totalAmount)
+            );
+            if (txHash) {
+              order.paymentTransactionHash = txHash;
               await order.save();
+              console.log(`[PaymentVerification] Stored payment tx hash for order ${order._id}: ${txHash}`);
             }
-
-            // Mark cart items as ordered
-            const userCart = await Cart.findOne({ user: order.buyer._id || order.buyer });
-            if (userCart) {
-              userCart.items = userCart.items.map(item => {
-                const itemObj = item.toObject ? item.toObject() : item;
-                itemObj.status = 'ordered';
-                return itemObj;
-              });
-              await userCart.save();
-            }
-
-            // Award referral bonus
-            const buyer = await User.findById(order.buyer._id || order.buyer);
-            if (buyer && buyer.referredBy) {
-              await awardReferralBonus(buyer._id, order.totalAmount);
-            }
-
-            // Reduce stock
-            await reduceStockOnOrder(order);
-
-            // Pay from wallet: transfer to platform wallet (user-tied uses buyerId)
-            try {
-              const buyer = await User.findById(order.buyer._id || order.buyer).select('cryptoPaymentAddress');
-              const isUserTied = buyer?.cryptoPaymentAddress && buyer.cryptoPaymentAddress === order.paymentAddress;
-              const sweepOptions = isUserTied ? { buyerId: (order.buyer._id || order.buyer).toString() } : {};
-              const payResult = await blockchainPaymentService.payFromWallet(order._id.toString(), order.currency, sweepOptions);
-              if (payResult.success) {
-                order.fundsSwept = true;
-                order.fundsSweptAt = new Date();
-                order.fundsSweptTxHash = payResult.transactionHash;
-                await order.save();
-                console.log(`Order ${order._id} funds swept to platform wallet`);
-              }
-            } catch (sweepErr) {
-              console.error(`Order ${order._id} payFromWallet error (sweeper will retry):`, sweepErr.message);
-            }
-
-            // Stop monitoring this order
-            transactionMonitor.stopMonitoring(order._id.toString());
-
-            console.log(`Order ${order._id} payment confirmed and processed`);
-          } else {
-            // Payment received but waiting for confirmations
-            await order.save();
-            console.log(`Order ${order._id} payment received, waiting for confirmations (${confirmations}/${requiredConfirmations})`);
           }
+
+          await markOrderPaidAndComplete(order);
+          console.log(`[PaymentVerification] Order ${order._id} confirmed (sweep will run via sweeper job)`);
         } else {
-          // Check if expired
+          // No payment found: cancel if past expiry
           if (order.paymentExpiry && new Date() > order.paymentExpiry) {
-            console.log(`Order ${order._id} payment expired`);
+            console.log(`[PaymentVerification] Order ${order._id} unpaid and past expiry – cancelling`);
             order.status = 'cancelled';
             order.paymentStatus = 'failed';
-            await order.save();
+            try {
+              await order.save();
+            } catch (saveErr) {
+              console.error(`Error saving expired order ${order._id}:`, saveErr);
+            }
             transactionMonitor.stopMonitoring(order._id.toString());
           }
         }
@@ -139,8 +133,24 @@ const paymentVerificationJob = cron.schedule('* * * * *', async () => {
   } catch (error) {
     console.error('Error in payment verification job:', error);
   }
-}, {
-  scheduled: false // Don't start automatically
-});
+}
+
+let intervalId = null;
+
+const paymentVerificationJob = {
+  start() {
+    if (intervalId) return;
+    runPaymentVerification();
+    intervalId = setInterval(runPaymentVerification, RUN_INTERVAL_MS);
+  },
+  stop() {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+    }
+  }
+};
 
 module.exports = paymentVerificationJob;
+module.exports.runPaymentVerification = runPaymentVerification;
+module.exports.markOrderPaidAndComplete = markOrderPaidAndComplete;

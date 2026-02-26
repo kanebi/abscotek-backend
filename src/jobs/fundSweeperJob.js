@@ -5,9 +5,9 @@ const blockchainPaymentService = require('../services/blockchainPaymentService')
 
 /**
  * Fund Sweeper Job
- * Runs every 2 minutes to sweep funds from payment addresses to main wallet
+ * Runs every 3 minutes. Sweeps paid crypto orders (payment verification confirms first; this job does the actual sweep with gas funding).
  */
-const fundSweeperJob = cron.schedule('*/2 * * * *', async () => {
+const fundSweeperJob = cron.schedule('*/3 * * * *', async () => {
   const runAt = new Date().toISOString();
   console.log(`[FundSweeper] Cron run at ${runAt}`);
   try {

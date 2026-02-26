@@ -542,6 +542,14 @@ const handlePaystackWebhook = async (req, res) => {
             console.error('Referral bonus error:', referralError);
             // Don't fail the order for referral errors
           }
+
+          try {
+            const populated = await Order.findById(order._id).populate('buyer', ['name', 'email']);
+            const { sendOrderConfirmationEmail } = require('../email');
+            await sendOrderConfirmationEmail(populated);
+          } catch (emailErr) {
+            console.error('Order confirmation email failed:', emailErr.message);
+          }
         }
       }
     }
@@ -550,6 +558,87 @@ const handlePaystackWebhook = async (req, res) => {
   } catch (error) {
     console.error('Paystack webhook error:', error);
     res.status(400).json({ status: 'error', message: error.message });
+  }
+};
+
+/**
+ * @desc    Handle Seerbit webhook (V2) for payment notifications
+ * @route   POST /api/orders/seerbit/webhook
+ * @access  Public (webhook – no auth)
+ * @see     https://doc.seerbit.com/online-payment/after-payment/webhook-event-v2
+ * Body: { notificationItems: [ { notificationRequestItem: { eventType, eventId, data: { reference, code, ... } } } ] }
+ * Success: data.code === "00". Respond with 200 and { ackReference, status: "received" } within 5s.
+ */
+const handleSeerbitWebhook = async (req, res) => {
+  const ackRef = req.headers['x-expected-ack-reference'] || `seerbit-ack-${Date.now()}`;
+
+  try {
+    const { notificationItems } = req.body || {};
+    if (!Array.isArray(notificationItems) || notificationItems.length === 0) {
+      return res.status(200).json({ ackReference: ackRef, status: 'received' });
+    }
+
+    for (const item of notificationItems) {
+      const requestItem = item?.notificationRequestItem;
+      if (!requestItem) continue;
+
+      const eventType = requestItem.eventType || '';
+      const eventId = requestItem.eventId;
+      const data = requestItem.data || {};
+      const reference = data.reference;
+      const code = String(data.code ?? data.gatewayCode ?? '').trim();
+
+      const isTransactionEvent = /^transaction/.test(eventType);
+      const isSuccess = code === '00';
+
+      if (!isTransactionEvent || !isSuccess || !reference) {
+        continue;
+      }
+
+      const order = await Order.findOne({ seerbitReference: reference });
+      if (!order) continue;
+      if (order.paymentStatus === 'paid') continue;
+
+      const verification = await seerbitService.verifyPayment(reference);
+      if (!verification || !verification.success) {
+        console.warn(`[Seerbit webhook] Verification failed for reference ${reference}, skipping order update`);
+        continue;
+      }
+
+      order.status = 'confirmed';
+      order.paymentStatus = 'paid';
+      order.paymentReference = reference;
+      await order.save();
+
+      const cart = await Cart.findOne({ user: order.buyer });
+      if (cart) {
+        cart.items = cart.items.map((i) => ({ ...i.toObject(), status: 'ordered' }));
+        await cart.save();
+      }
+
+      try {
+        await awardReferralBonus(order.buyer, order.totalAmount);
+      } catch (referralError) {
+        console.error('[Seerbit webhook] Referral bonus error:', referralError);
+      }
+
+      try {
+        const populated = await Order.findById(order._id).populate('buyer', ['name', 'email']);
+        const { sendOrderConfirmationEmail } = require('../email');
+        await sendOrderConfirmationEmail(populated);
+      } catch (emailErr) {
+        console.error('[Seerbit webhook] Order confirmation email failed:', emailErr.message);
+      }
+
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[Seerbit webhook] Order ${order._id} confirmed for reference ${reference}, eventId ${eventId}`);
+      }
+    }
+
+    return res.status(200).json({ ackReference: ackRef, status: 'received' });
+  } catch (error) {
+    console.error('Seerbit webhook error:', error);
+    return res.status(200).json({ ackReference: ackRef, status: 'received' });
   }
 };
 
@@ -1218,6 +1307,17 @@ const adminUpdateOrder = async (req, res) => {
 
     await order.save();
 
+    // Send status change email when moving to processing, shipped, or delivered (not pending -> confirmed)
+    if (status && previousStatus !== statusLower && ['processing', 'shipped', 'delivered'].includes(statusLower)) {
+      try {
+        const orderWithBuyer = await Order.findById(order._id).populate('buyer', ['name', 'email']);
+        const { sendOrderStatusChangeEmail } = require('../email');
+        await sendOrderStatusChangeEmail(orderWithBuyer, statusLower, previousStatus);
+      } catch (e) {
+        console.error('Order status change email failed:', e.message);
+      }
+    }
+
     const updated = await Order.findById(order._id)
       .populate({
         path: 'items',
@@ -1407,6 +1507,14 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
 
       await session.commitTransaction();
       transactionCommitted = true;
+
+      try {
+        const populated = await Order.findById(existingOrder._id).populate('buyer', ['name', 'email']);
+        const { sendOrderConfirmationEmail } = require('../email');
+        await sendOrderConfirmationEmail(populated);
+      } catch (emailErr) {
+        console.error('Order confirmation email failed:', emailErr.message);
+      }
 
       const orderObj = existingOrder.toObject();
       orderObj._id = orderObj._id.toString();
@@ -2119,6 +2227,14 @@ const processUSDCWalletPayment = async (req, res) => {
       await awardReferralBonus(req.user.id, totalAmount);
     }
 
+    try {
+      const populated = await Order.findById(order._id).populate('buyer', ['name', 'email']);
+      const { sendOrderConfirmationEmail } = require('../email');
+      await sendOrderConfirmationEmail(populated);
+    } catch (emailErr) {
+      console.error('Order confirmation email failed:', emailErr.message);
+    }
+
     const orderObj = order.toObject();
     orderObj._id = orderObj._id.toString();
 
@@ -2602,7 +2718,7 @@ const checkCryptoPaymentStatus = async (req, res) => {
   }
 };
 
-// @desc    Confirm crypto payment (check + sweep + confirm order) - called when user clicks "I have made payment"
+// @desc    Confirm crypto payment (check + sweep + confirm order) - same flow as payment verification job
 // @route   POST /api/orders/:orderId/confirm-crypto-payment
 // @access  Private
 const confirmCryptoPayment = async (req, res) => {
@@ -2620,11 +2736,13 @@ const confirmCryptoPayment = async (req, res) => {
     }
 
     if (order.paymentStatus === 'paid') {
+      const updated = await Order.findById(orderId).populate('buyer').populate('items.product');
       return res.json({
         success: true,
         status: 'paid',
         message: 'Order already confirmed',
-        orderStatus: order.status
+        orderStatus: order.status,
+        order: updated
       });
     }
 
@@ -2632,14 +2750,34 @@ const confirmCryptoPayment = async (req, res) => {
       return res.status(400).json({ msg: 'Not a crypto order or no payment address' });
     }
 
+    // Normalize legacy currency (same as job)
+    if (order.currency === 'USDT') {
+      order.currency = 'USDC';
+    }
+    const orderCurrency = order.currency || 'USDC';
+
     const blockchainPaymentService = require('../services/blockchainPaymentService');
     const paymentReceived = await blockchainPaymentService.checkPaymentReceived(
       order.paymentAddress,
       order.totalAmount,
-      order.currency || 'USDC'
+      orderCurrency
     );
 
     if (!paymentReceived) {
+      // Unpaid and past expiry: cancel in real time (same as job)
+      if (order.paymentExpiry && new Date() > order.paymentExpiry) {
+        order.status = 'cancelled';
+        order.paymentStatus = 'failed';
+        await order.save().catch(() => {});
+        const transactionMonitor = require('../services/transactionMonitor');
+        transactionMonitor.stopMonitoring(order._id.toString());
+        return res.json({
+          success: false,
+          status: 'cancelled',
+          msg: 'Order expired and payment was not received',
+          orderStatus: 'cancelled'
+        });
+      }
       return res.status(400).json({
         success: false,
         msg: 'Payment not detected',
@@ -2647,11 +2785,22 @@ const confirmCryptoPayment = async (req, res) => {
       });
     }
 
-    // Payment detected: sweep, confirm, process
+    // Optional: discover and store payment tx hash (same as job)
+    if (!order.paymentTransactionHash) {
+      const txHash = await blockchainPaymentService.getIncomingUSDCTransferTxHash(
+        order.paymentAddress,
+        Number(order.totalAmount)
+      );
+      if (txHash) {
+        order.paymentTransactionHash = txHash;
+        await order.save();
+      }
+    }
+
+    // Sweep first; mark paid only on success (same as job)
     const buyer = await User.findById(order.buyer._id || order.buyer).select('cryptoPaymentAddress');
     const isUserTied = buyer?.cryptoPaymentAddress && buyer.cryptoPaymentAddress === order.paymentAddress;
     const sweepOptions = isUserTied ? { buyerId: (order.buyer._id || order.buyer).toString() } : {};
-
     const payResult = await blockchainPaymentService.payFromWallet(order._id.toString(), order.currency || 'USDC', sweepOptions);
 
     if (!payResult.success) {
@@ -2661,55 +2810,27 @@ const confirmCryptoPayment = async (req, res) => {
       });
     }
 
-    order.paymentStatus = 'paid';
-    order.status = 'confirmed';
-    order.paymentTransactionHash = payResult.transactionHash;
-    order.paymentConfirmations = 3;
     order.fundsSwept = true;
     order.fundsSweptAt = new Date();
     order.fundsSweptTxHash = payResult.transactionHash;
-    await order.save();
 
-    const existingPayment = await Payment.findOne({ order: order._id });
-    if (!existingPayment) {
-      const payment = new Payment({
-        order: order._id,
-        user: order.buyer._id || order.buyer,
-        amount: order.totalAmount,
-        currency: order.currency,
-        method: 'crypto',
-        status: 'completed',
-        paymentDate: new Date(),
-        transactionHash: payResult.transactionHash
-      });
-      await payment.save();
+    const { markOrderPaidAndComplete } = require('../jobs/paymentVerificationJob');
+    await markOrderPaidAndComplete(order);
+
+    try {
+      const { sendOrderConfirmationEmail } = require('../email');
+      await sendOrderConfirmationEmail(order);
+    } catch (e) {
+      console.error('Order confirmation email failed:', e.message);
     }
 
-    const userCart = await Cart.findOne({ user: order.buyer._id || order.buyer });
-    if (userCart) {
-      userCart.items = userCart.items.map(item => {
-        const itemObj = item.toObject ? item.toObject() : item;
-        itemObj.status = 'ordered';
-        return itemObj;
-      });
-      await userCart.save();
-    }
-
-    const buyerUser = await User.findById(order.buyer._id || order.buyer);
-    if (buyerUser && buyerUser.referredBy) {
-      await awardReferralBonus(buyerUser._id, order.totalAmount);
-    }
-
-    await reduceStockOnOrder(order);
-
-    const transactionMonitor = require('../services/transactionMonitor');
-    transactionMonitor.stopMonitoring(order._id.toString());
-
+    const updatedOrder = await Order.findById(orderId).populate('buyer').populate('items.product');
     return res.json({
       success: true,
       status: 'paid',
       orderStatus: 'confirmed',
-      transactionHash: payResult.transactionHash
+      transactionHash: payResult.transactionHash,
+      order: updatedOrder
     });
   } catch (error) {
     console.error('Error confirming crypto payment:', error);
@@ -2744,6 +2865,7 @@ module.exports = {
   checkoutFromCart,
   handlePaystackWebhook,
   handleSeerbitCallback,
+  handleSeerbitWebhook,
   getOrders,
   getOrdersPaginated,
   getOrderById,
