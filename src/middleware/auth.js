@@ -20,14 +20,16 @@ const extractUserInfo = async (req) => {
         return user;
       }
     } catch (err) {
-      // Not a local JWT, try Privy JWT verification using direct REST API
+      // Not a local JWT, try Privy JWT verification using direct REST API (Origin required by Privy)
       try {
+        const frontendOrigin = (process.env.FRONTEND_URL || process.env.PRIVY_ORIGIN || 'http://localhost:5173').replace(/\/$/, '');
         const response = await fetch('https://api.privy.io/v1/users/me', {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${token}`,
             'privy-app-id': process.env.PRIVY_APP_ID,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Origin': frontendOrigin
           }
         });
 
@@ -44,7 +46,6 @@ const extractUserInfo = async (req) => {
         }
       } catch (privyErr) {
         // Neither local nor Privy JWT, continue to fallback methods
-        console.log('Privy verification failed in auth middleware:', privyErr.message);
       }
     }
   }
@@ -92,32 +93,20 @@ const optionalAuth = async function (req, res, next) {
 // Main authentication middleware
 const auth = async function (req, res, next) {
   try {
-    console.log('Auth middleware - checking authentication for:', req.path);
-    console.log('Auth headers:', {
-      'x-auth-token': !!req.header('x-auth-token'),
-      'Authorization': !!req.header('Authorization'),
-      'x-wallet-address': !!req.header('x-wallet-address'),
-      'x-user-email': !!req.header('x-user-email'),
-      'x-user-id': !!req.header('x-user-id')
-    });
-    
+    console.log(`${req.method} ${req.originalUrl || req.path}`);
     const user = await extractUserInfo(req);
-    console.log('Auth middleware - user found:', !!user, user ? { id: user.id, email: user.email } : null);
 
     if (!user) {
-      console.log('Auth middleware - no user found, returning 401');
       return res.status(401).json({ 
         msg: 'No valid authentication found',
         error: 'Authentication required'
       });
     }
 
-    // Attach user to request
     req.user = user;
-    console.log('Auth middleware - user attached to request:', req.user.id);
     next();
   } catch (err) {
-    console.error('Auth middleware error:', err);
+    console.error(`${req.method} ${req.originalUrl || req.path} 500`);
     res.status(500).json({ 
       msg: 'Authentication error',
       error: 'Server error during authentication'
@@ -151,7 +140,7 @@ module.exports.admin = async function (req, res, next) {
     req.user = user;
     next();
   } catch (err) {
-    console.error('Admin auth middleware error:', err);
+    console.error(`${req.method} ${req.originalUrl || req.path} 500`);
     res.status(500).json({ 
       msg: 'Authentication error',
       error: 'Server error during authentication'
@@ -179,7 +168,7 @@ module.exports.adminOrVendor = async function (req, res, next) {
     req.user = user;
     next();
   } catch (err) {
-    console.error('Admin/Vendor auth middleware error:', err);
+    console.error(`${req.method} ${req.originalUrl || req.path} 500`);
     res.status(500).json({ 
       errors: [{ msg: 'Server error during authentication' }]
     });

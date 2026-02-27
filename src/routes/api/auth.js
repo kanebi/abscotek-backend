@@ -68,7 +68,7 @@ router.get('/', auth, async (req, res) => {
     const user = await User.findById(req.user.id).select('-password').lean();
     res.json(user);
   } catch (err) {
-    console.error(err.message);
+    console.error('GET /api/auth 500');
     res.status(500).send('Server Error');
   }
 });
@@ -174,7 +174,7 @@ router.post(
         }
       );
     } catch (err) {
-      console.error(err.message);
+      console.error('POST /api/auth 500');
       res.status(500).send('Server error');
     }
   }
@@ -216,6 +216,7 @@ router.post(
  *         description: Server error
  */
 router.post('/privy', async (req, res) => {
+  console.log('POST /api/auth/privy');
   const { accessToken } = req.body;
 
   if (!accessToken) {
@@ -223,34 +224,23 @@ router.post('/privy', async (req, res) => {
   }
 
   try {
-    // Use direct REST API approach instead of PrivyClient
-    console.log('Using direct Privy REST API approach...');
-    console.log('App ID:', process.env.PRIVY_APP_ID);
-    console.log('App Secret length:', process.env.PRIVY_APP_SECRET ? process.env.PRIVY_APP_SECRET.length : 'Not set');
-    
-    // Create Basic Auth header for Privy API
-    const authString = `${process.env.PRIVY_APP_ID}:${process.env.PRIVY_APP_SECRET}`;
-    const authHeader = Buffer.from(authString).toString('base64');
-    
-    // Verify the access token using Privy's REST API
-    console.log('Verifying access token with Privy REST API...');
+    const frontendOrigin = (process.env.FRONTEND_URL || process.env.PRIVY_ORIGIN || 'http://localhost:5173').replace(/\/$/, '');
     const response = await fetch('https://api.privy.io/v1/users/me', {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'privy-app-id': process.env.PRIVY_APP_ID,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Origin': frontendOrigin
       }
     });
     
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Privy API error:', response.status, errorText);
       throw new Error(`Privy API error: ${response.status} - ${errorText}`);
     }
     
     const privyUser = await response.json();
-    console.log('User from Privy API:', JSON.stringify(privyUser, null, 2));
     
     // Extract user info from the API response
     const privyUserData = privyUser.user; // The actual user data is nested under 'user'
@@ -282,7 +272,6 @@ router.post('/privy', async (req, res) => {
         existingUser.lastLogin = new Date();
         await existingUser.save();
         user = existingUser;
-        console.log('Linked Privy account to existing user:', existingUser.email);
       } else {
         // Create new user with Privy data
         user = new User({
@@ -294,7 +283,6 @@ router.post('/privy', async (req, res) => {
           linked: true, // Mark as linked to Privy
         });
         await user.save();
-        console.log('Created new user with Privy account:', user.email);
       }
     } else {
       // Update existing Privy-linked user with latest data
@@ -307,7 +295,6 @@ router.post('/privy', async (req, res) => {
       user.linked = true; // Ensure it's marked as linked
       user.lastLogin = new Date();
       await user.save();
-      console.log('Updated existing Privy-linked user:', user.email);
     }
 
     // Create JWT payload
@@ -342,11 +329,7 @@ router.post('/privy', async (req, res) => {
       }
     );
   } catch (err) {
-    console.error('Privy auth error:', err.message);
-    console.error('Privy auth error details:', err);
-    console.error('Access token received:', accessToken ? 'Present' : 'Missing');
-    console.error('PRIVY_APP_ID:', process.env.PRIVY_APP_ID);
-    console.error('PRIVY_APP_SECRET:', process.env.PRIVY_APP_SECRET ? 'Set (length: ' + process.env.PRIVY_APP_SECRET.length + ')' : 'Not set');
+    console.error('POST /api/auth/privy 401');
     res.status(401).json({ 
       errors: [{ 
         msg: 'Invalid access token',
