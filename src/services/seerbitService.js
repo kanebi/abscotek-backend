@@ -94,10 +94,9 @@ async function verifyPayment(paymentReference) {
     }
   });
   const data = await res.json().catch(() => ({}));
-  // SeerBit success: code "00" or status indicating success
+  // Per SeerBit docs, code "00" indicates a successful transaction
   const code = data?.code ?? data?.data?.code ?? data?.payload?.code;
-  const status = (data?.status || data?.data?.status || '').toUpperCase();
-  const success = code === '00' || status === 'SUCCESS' || (data?.data?.payments?.paymentStatus || '').toUpperCase() === 'SUCCESS';
+  const success = code === '00';
   return {
     success: !!success,
     amount: data?.data?.payments?.amount ?? data?.payload?.amount,

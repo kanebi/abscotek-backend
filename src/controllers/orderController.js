@@ -1389,6 +1389,8 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
       paymentMethod,
       paystackReference,
       seerbitReference,
+      // Alias for callback/query param name, e.g. { reference: '...' }
+      reference,
       deliveryMethodId,
       shippingAddressId,
       currency = 'USDC',
@@ -1405,9 +1407,11 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
     // Filter out ordered items - only process active items
     let activeItems = cart.items.filter(item => item.status !== 'ordered');
 
-    // SeerBit: order was already created at checkout; find it and confirm with order items from cart
-    if (paymentMethod === 'seerbit' && seerbitReference) {
-      const refStr = typeof seerbitReference === 'string' ? seerbitReference : seerbitReference?.reference;
+    // SeerBit: order was already created at checkout; find it and confirm with order items from cart.
+    // Always require a valid reference for SeerBit; if none is provided, treat as unsuccessful.
+    if (paymentMethod === 'seerbit') {
+      const rawRef = seerbitReference || reference;
+      const refStr = typeof rawRef === 'string' ? rawRef : rawRef?.reference;
       if (!refStr) {
         await session.abortTransaction();
         return res.status(400).json({ msg: 'SeerBit reference is required' });
