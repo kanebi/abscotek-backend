@@ -61,6 +61,15 @@ const OrderItemSchema = new mongoose.Schema({
   productName: {
     type: String,
     default: null
+  },
+  // Snapshot of product at order time — used for display without populating Product
+  productSnapshot: {
+    name: { type: String, default: null },
+    description: { type: String, default: null },
+    images: { type: [String], default: [] },
+    price: { type: Number, default: null },
+    currency: { type: String, default: null },
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null }
   }
 }, {
   timestamps: true

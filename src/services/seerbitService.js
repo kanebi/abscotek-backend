@@ -75,33 +75,121 @@ async function initializePayment(opts) {
 }
 
 /**
- * Verify payment status with SeerBit backend.
- * Call this before confirming an order so we only confirm when SeerBit reports success.
- * @param {string} paymentReference - The payment reference (e.g. from redirect/success)
- * @returns {Promise<{ success: boolean, amount?: number, message?: string }>}
+ * Single attempt to query SeerBit for the status of a payment reference.
+ * Returns the full parsed response body (or {} on parse failure).
+ * @param {number} [timeoutMs=20000] - Request timeout in ms (default 20s)
  */
-async function verifyPayment(paymentReference) {
+async function querySeerbit(paymentReference, token, timeoutMs = 20000) {
+  const url = `${SEERBIT_QUERY_URL}/${encodeURIComponent(paymentReference)}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    const body = await res.json().catch(() => ({}));
+    return { httpStatus: res.status, body };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error(`SeerBit query timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Parse a SeerBit query response and determine if the payment was successful.
+ * Per docs: outer status === "SUCCESS" AND data.code === "00" means success.
+ * Also accept data.payments.gatewayCode === "00" as a secondary check.
+ */
+function parseSeerbitResult(body) {
+  // Shape: { status, data: { code, message, payments: { ... } } }
+  const outerStatus = body?.status;
+  const innerCode = body?.data?.code ?? body?.code;
+  const gatewayCode = body?.data?.payments?.gatewayCode;
+  const payments = body?.data?.payments ?? body?.payments;
+
+  const success =
+    outerStatus === 'SUCCESS' &&
+    (innerCode === '00' || (!innerCode && gatewayCode === '00'));
+
+  return {
+    success: !!success,
+    amount: payments?.amount,
+    paymentReference: payments?.paymentReference,
+    message: body?.data?.message || body?.message || body?.error ||
+      (success ? undefined : `SeerBit code: ${innerCode || '?'}`)
+  };
+}
+
+/**
+ * Verify payment status with SeerBit.
+ * Retries up to maxAttempts times with exponential backoff (SeerBit may redirect the user
+ * before the payment is fully processed on their backend – a race condition).
+ * @param {string} paymentReference
+ * @param {object} [opts]
+ * @param {number} [opts.maxAttempts=8]
+ * @param {number} [opts.initialDelayMs=2500]
+ * @param {number} [opts.queryTimeoutMs=20000] - Timeout per query request in ms
+ * @returns {Promise<{ success: boolean, amount?: number, message?: string, attempts?: number }>}
+ */
+async function verifyPayment(paymentReference, opts = {}) {
   if (!paymentReference || typeof paymentReference !== 'string') {
     return { success: false, message: 'Invalid payment reference' };
   }
-  const token = await getBearerToken();
-  const url = `${SEERBIT_QUERY_URL}/${encodeURIComponent(paymentReference)}`;
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`
+
+  const maxAttempts = opts.maxAttempts ?? 8;
+  const initialDelayMs = opts.initialDelayMs ?? 2500;
+  const queryTimeoutMs = opts.queryTimeoutMs ?? 20000;
+
+  let token;
+  try {
+    token = await getBearerToken();
+  } catch (err) {
+    return { success: false, message: `Could not obtain SeerBit token: ${err.message}` };
+  }
+
+  let lastResult = { success: false, message: 'No attempts made' };
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { httpStatus, body } = await querySeerbit(paymentReference, token, queryTimeoutMs);
+      console.log(`[SeerBit verify] attempt ${attempt}/${maxAttempts} ref=${paymentReference} http=${httpStatus} code=${body?.data?.code}`);
+
+      const result = parseSeerbitResult(body);
+      lastResult = { ...result, attempts: attempt };
+
+      if (result.success) {
+        return lastResult;
+      }
+
+      // If SeerBit explicitly says the transaction failed (non-pending code), stop retrying
+      const innerCode = body?.data?.code ?? body?.code;
+      const isPending = !innerCode || innerCode === '09' || httpStatus === 404;
+      if (!isPending && attempt < maxAttempts) {
+        console.log(`[SeerBit verify] payment definitively failed (code ${innerCode}), stopping retries`);
+        return lastResult;
+      }
+    } catch (err) {
+      console.warn(`[SeerBit verify] attempt ${attempt} error: ${err.message}`);
+      lastResult = { success: false, message: err.message, attempts: attempt };
     }
-  });
-  const data = await res.json().catch(() => ({}));
-  // Per SeerBit docs, code "00" indicates a successful transaction
-  const code = data?.code ?? data?.data?.code ?? data?.payload?.code;
-  const success = code === '00';
-  return {
-    success: !!success,
-    amount: data?.data?.payments?.amount ?? data?.payload?.amount,
-    message: data?.message || data?.error || (success ? undefined : 'Payment not confirmed by SeerBit')
-  };
+
+    if (attempt < maxAttempts) {
+      const delay = initialDelayMs * Math.pow(1.5, attempt - 1);
+      console.log(`[SeerBit verify] waiting ${Math.round(delay)}ms before retry ${attempt + 1}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+
+  return lastResult;
 }
 
 /**
@@ -117,5 +205,6 @@ module.exports = {
   getBearerToken,
   initializePayment,
   verifyPayment,
+  parseSeerbitResult,
   generateReference
 };

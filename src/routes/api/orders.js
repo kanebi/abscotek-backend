@@ -15,6 +15,7 @@ const {
   cancelOrder,
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
+  reinitializeSeerbitPayment,
   processUSDCWalletPayment,
   createCryptoPaymentOrder,
   checkCryptoPaymentStatus,
@@ -384,6 +385,7 @@ router.post('/usdc-payment', auth, processUSDCWalletPayment);
 router.post('/create-crypto-payment', auth, createCryptoPaymentOrder);
 router.get('/:orderId/crypto-payment-status', auth, checkCryptoPaymentStatus);
 router.post('/:orderId/confirm-crypto-payment', auth, confirmCryptoPayment);
+router.post('/:id/seerbit-pay', auth, reinitializeSeerbitPayment);
 
 /**
  * @swagger

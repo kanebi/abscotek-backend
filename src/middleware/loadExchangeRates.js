@@ -33,8 +33,7 @@ async function loadExchangeRates(req, res, next) {
       USD: 1,
       NGN: 1500,
       EUR: 0.92,
-      GHS: 15,
-      GHC: 15
+      GHS: 15
     });
     next();
   } finally {

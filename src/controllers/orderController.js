@@ -11,6 +11,27 @@ const Paystack = require('paystack-api')(process.env.PAYSTACK_SECRET_KEY);
 const seerbitService = require('../services/seerbitService');
 const { reduceStockOnOrder } = require('../utils/stockAnalysis');
 
+/** Build productSnapshot for OrderItem from product (and optional cartItem for variant images). */
+function buildProductSnapshot(product, cartItem = null) {
+  if (!product) return { name: null, description: null, images: [], price: null, currency: null, productId: null };
+  let images = [];
+  if (cartItem?.variant?.images?.length) {
+    images = Array.isArray(cartItem.variant.images) ? [...cartItem.variant.images] : [];
+  }
+  if (images.length === 0 && product.images?.length) {
+    images = Array.isArray(product.images) ? [...product.images] : [product.images];
+  }
+  if (images.length === 0) images = ['/images/desktop-1.png'];
+  return {
+    name: product.name || null,
+    description: product.description ?? null,
+    images,
+    price: product.price ?? null,
+    currency: (product.currency === 'USDT' ? 'USDC' : product.currency) || null,
+    productId: product._id || null
+  };
+}
+
 // @desc    Create an order (direct)
 // @route   POST /api/orders
 // @access  Private
@@ -139,7 +160,7 @@ const checkoutFromCart = async (req, res) => {
       notes = ''
     } = req.body;
 
-    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price']);
+    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price', 'images', 'currency', 'name', 'description']);
     if (!cart || cart.items.length === 0) {
       return res.status(400).json({ msg: 'Cart is empty' });
     }
@@ -249,14 +270,9 @@ const checkoutFromCart = async (req, res) => {
         orderId: orderObj._id // Explicitly include orderId for frontend
       });
     } else if (paymentMethod === 'seerbit') {
-      // SeerBit Standard Checkout: create order, initialize payment, return redirect link
-      const orderData = {
+      // SeerBit Standard Checkout: create order + items snapshot, initialize payment, return redirect link
+      const order = new Order({
         buyer: req.user.id,
-        products: cart.items.map(item => ({
-          product: item.product._id,
-          quantity: item.quantity,
-          price: item.product.price
-        })),
         subTotal: subTotalInOrderCurrency,
         deliveryMethod: deliveryMethodId,
         deliveryFee: deliveryFeeInOrderCurrency,
@@ -267,8 +283,51 @@ const checkoutFromCart = async (req, res) => {
         currency,
         notes,
         shippingAddress: shippingAddressId || null
-      };
-      const order = new Order(orderData);
+      });
+      await order.save();
+
+      // Create OrderItems immediately so the order is visible in the user's order list
+      // with proper product info even before payment is confirmed.
+      const snapshotItems = [];
+      for (const cartItem of activeItems) {
+        const product = cartItem.product;
+        let variantData;
+        if (cartItem.variant && typeof cartItem.variant === 'object') {
+          variantData = {
+            variantId: cartItem.variant._id || cartItem.variant.variantId || null,
+            name: cartItem.variant.name || null,
+            attributes: cartItem.variant.attributes || [],
+            additionalPrice: cartItem.variant.additionalPrice || cartItem.variant.price || 0
+          };
+        }
+        const productCurrency = (product?.currency === 'USDT' ? 'USDC' : product?.currency) || currency;
+        let unitPrice = cartItem.unitPrice ?? product?.price ?? 0;
+        if (productCurrency !== currency) {
+          if (productCurrency === 'NGN' && (currency === 'USDC' || currency === 'USD')) {
+            unitPrice = unitPrice / NGN_PER_USD;
+          } else if ((productCurrency === 'USDC' || productCurrency === 'USD') && currency === 'NGN') {
+            unitPrice = unitPrice * NGN_PER_USD;
+          }
+        }
+        const itemData = {
+          order: order._id,
+          product: product._id,
+          specs: Array.isArray(cartItem.specs) ? cartItem.specs : [],
+          quantity: cartItem.quantity,
+          unitPrice,
+          totalPrice: unitPrice * cartItem.quantity,
+          currency: (productCurrency === 'USDT' ? 'USDC' : productCurrency),
+          status: 'ordered',
+          productImage: (product?.images?.length > 0) ? product.images[0] : '/images/desktop-1.png',
+          productName: product?.name || '',
+          productSnapshot: buildProductSnapshot(product, cartItem)
+        };
+        if (variantData) itemData.variant = variantData;
+        const orderItem = new OrderItem(itemData);
+        await orderItem.save();
+        snapshotItems.push(orderItem._id);
+      }
+      order.items = snapshotItems;
       await order.save();
 
       const seerbitReference = seerbitService.generateReference();
@@ -898,29 +957,38 @@ const getOrderById = async (req, res) => {
 
     // Ensure all items have unitPrice and process items for frontend
     if (orderObj.items && orderObj.items.length > 0) {
-      // Process all items to ensure unitPrice is available and product.price reflects unitPrice
+      // Enrich each item with product display from productSnapshot (no populate needed)
       orderObj.items = orderObj.items.map(item => {
         const itemObj = item.toObject ? item.toObject() : item;
-        // Ensure unitPrice is set (it should be from OrderItem schema)
-        if (!itemObj.unitPrice && itemObj.price) {
-          itemObj.unitPrice = itemObj.price;
-        }
-        // Ensure product.price reflects unitPrice if variant is selected (for frontend compatibility)
-        if (itemObj.product && itemObj.unitPrice) {
-          itemObj.product.price = itemObj.unitPrice;
-        }
+        if (!itemObj.unitPrice && itemObj.price) itemObj.unitPrice = itemObj.price;
+        const snap = itemObj.productSnapshot;
+        const images = (snap?.images?.length > 0) ? snap.images : (itemObj.productImage ? [itemObj.productImage] : (itemObj.product?.images?.length > 0 ? itemObj.product.images : ['/images/desktop-1.png']));
+        const name = snap?.name || itemObj.productName || itemObj.product?.name || 'Product';
+        const description = snap?.description ?? itemObj.product?.description ?? null;
+        const price = snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price;
+        itemObj.product = {
+          _id: snap?.productId || itemObj.product?._id,
+          name,
+          description,
+          price: price ?? itemObj.unitPrice,
+          images,
+          currency: snap?.currency || itemObj.currency
+        };
         return itemObj;
       });
-      
-      // Flatten product data for frontend compatibility (first item for legacy support)
+
       const firstItem = orderObj.items[0];
+      const snap = firstItem.productSnapshot;
       orderObj.product = {
-        name: firstItem.productName || firstItem.product?.name || 'Product',
+        name: (snap?.name && String(snap.name).trim()) || firstItem.productName || firstItem.product?.name || 'Product',
         variant: firstItem.variant?.name || '',
         quantity: firstItem.quantity,
         price: firstItem.unitPrice || firstItem.price,
         unitPrice: firstItem.unitPrice || firstItem.price,
-        images: firstItem.product?.images || []
+        description: snap?.description ?? firstItem.product?.description ?? null,
+        images: (snap?.images?.length > 0) ? snap.images : (firstItem.productImage ? [firstItem.productImage] : (firstItem.product?.images?.length > 0 ? firstItem.product.images : ['/images/desktop-1.png'])),
+        productId: snap?.productId?.toString() || firstItem.product?._id?.toString(),
+        currency: firstItem.currency || snap?.currency || orderObj.currency || 'USDC'
       };
     }
 
@@ -1052,15 +1120,57 @@ const getOrderByNumber = async (req, res) => {
       total: orderObj.calculatedTotal || orderObj.totalAmount
     };
 
+    // Enrich each item with product display from productSnapshot
+    if (orderObj.items && orderObj.items.length > 0) {
+      const PLACEHOLDER_IMAGE = '/images/desktop-1.png';
+      const isPlaceholderOnly = (imgs) => !imgs?.length || (imgs.length === 1 && imgs[0] === PLACEHOLDER_IMAGE);
+
+      orderObj.items = orderObj.items.map(item => {
+        const itemObj = item.toObject ? item.toObject() : item;
+        const snap = itemObj.productSnapshot;
+        const images = (snap?.images?.length > 0) ? snap.images : (itemObj.productImage ? [itemObj.productImage] : (itemObj.product?.images?.length > 0 ? itemObj.product.images : [PLACEHOLDER_IMAGE]));
+        itemObj.product = {
+          _id: snap?.productId || itemObj.product?._id,
+          name: snap?.name || itemObj.productName || itemObj.product?.name || 'Product',
+          description: snap?.description ?? itemObj.product?.description ?? null,
+          price: snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price,
+          images,
+          currency: snap?.currency || itemObj.currency
+        };
+        return itemObj;
+      });
+
+      for (const item of orderObj.items) {
+        if (!isPlaceholderOnly(item.product?.images)) continue;
+        const productId = item.product?._id || item.productSnapshot?.productId;
+        if (!productId) continue;
+        try {
+          const currentProduct = await Product.findById(productId).select('images').lean();
+          if (currentProduct?.images?.length > 0) item.product.images = currentProduct.images;
+        } catch (_) { /* ignore */ }
+      }
+    }
+
     // Flatten product data for frontend compatibility
     if (orderObj.items && orderObj.items.length > 0) {
       const firstItem = orderObj.items[0];
+      const snap = firstItem.productSnapshot;
+      let firstImages = (snap?.images?.length > 0) ? snap.images : (firstItem.productImage ? [firstItem.productImage] : (firstItem.product?.images?.length > 0 ? firstItem.product.images : ['/images/desktop-1.png']));
+      const PLACEHOLDER_IMAGE = '/images/desktop-1.png';
+      if ((!firstImages?.length || (firstImages.length === 1 && firstImages[0] === PLACEHOLDER_IMAGE)) && (snap?.productId || firstItem.product?._id)) {
+        try {
+          const currentProduct = await Product.findById(snap?.productId || firstItem.product?._id).select('images').lean();
+          if (currentProduct?.images?.length > 0) firstImages = currentProduct.images;
+        } catch (_) { /* ignore */ }
+      }
       orderObj.product = {
-        name: firstItem.productName || firstItem.product?.name || 'Product',
+        name: (snap?.name && String(snap.name).trim()) || firstItem.productName || firstItem.product?.name || 'Product',
         variant: firstItem.variant?.name || '',
         quantity: firstItem.quantity,
         price: firstItem.unitPrice,
-        images: firstItem.product?.images || []
+        description: snap?.description ?? firstItem.product?.description ?? null,
+        images: firstImages,
+        productId: snap?.productId?.toString() || firstItem.product?._id?.toString()
       };
     }
 
@@ -1142,24 +1252,22 @@ const adminListOrders = async (req, res) => {
       const orderObj = order.toObject();
       orderObj._id = orderObj._id.toString();
       
-      // Ensure all items have product images - fallback to stored productImage or placeholder
+      // Ensure all items have product images - prefer productSnapshot, then productImage, then populated product
       if (orderObj.items && orderObj.items.length > 0) {
         for (let item of orderObj.items) {
-          // If product is populated but missing images, use stored productImage or placeholder
+          const snap = item.productSnapshot;
+          const images = (snap?.images?.length > 0) ? snap.images : (item.productImage ? [item.productImage] : (item.product?.images?.length > 0 ? item.product.images : ['/images/desktop-1.png']));
+          const name = snap?.name || item.productName || item.product?.name || 'Product';
           if (item.product) {
-            if (!item.product.images || item.product.images.length === 0) {
-              item.product.images = item.productImage ? [item.productImage] : ['/images/desktop-1.png'];
-            }
-            // Ensure product name is available
-            if (!item.product.name && item.productName) {
-              item.product.name = item.productName;
-            }
+            item.product.images = images;
+            if (!item.product.name && name) item.product.name = name;
+            if (snap?.description != null) item.product.description = snap.description;
           } else {
-            // If product is not populated, create a minimal product object from stored data
             item.product = {
-              _id: item.product || 'unknown',
-              name: item.productName || 'Product',
-              images: item.productImage ? [item.productImage] : ['/images/desktop-1.png'],
+              _id: snap?.productId || item.product || 'unknown',
+              name,
+              description: snap?.description ?? null,
+              images,
               price: item.unitPrice,
               currency: item.currency
             };
@@ -1210,24 +1318,22 @@ const adminGetOrderById = async (req, res) => {
     const orderObj = order.toObject();
     orderObj._id = orderObj._id.toString();
 
-    // Ensure all items have product images - fallback to stored productImage or placeholder
+    // Ensure all items have product images - prefer productSnapshot
     if (orderObj.items && orderObj.items.length > 0) {
       for (let item of orderObj.items) {
-        // If product is populated but missing images, use stored productImage or placeholder
+        const snap = item.productSnapshot;
+        const images = (snap?.images?.length > 0) ? snap.images : (item.productImage ? [item.productImage] : (item.product?.images?.length > 0 ? item.product.images : ['/images/desktop-1.png']));
+        const name = snap?.name || item.productName || item.product?.name || 'Product';
         if (item.product) {
-          if (!item.product.images || item.product.images.length === 0) {
-            item.product.images = item.productImage ? [item.productImage] : ['/images/desktop-1.png'];
-          }
-          // Ensure product name is available
-          if (!item.product.name && item.productName) {
-            item.product.name = item.productName;
-          }
+          item.product.images = images;
+          if (!item.product.name && name) item.product.name = name;
+          if (snap?.description != null) item.product.description = snap.description;
         } else {
-          // If product is not populated, create a minimal product object from stored data
           item.product = {
-            _id: item.product || 'unknown',
-            name: item.productName || 'Product',
-            images: item.productImage ? [item.productImage] : ['/images/desktop-1.png'],
+            _id: snap?.productId || item.product || 'unknown',
+            name,
+            description: snap?.description ?? null,
+            images,
             price: item.unitPrice,
             currency: item.currency
           };
@@ -1397,18 +1503,11 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
       notes = ''
     } = req.body;
 
-    // Get user's cart
-    let cart = await Cart.findOne({ user: userId }).populate('items.product', ['price', 'images', 'currency', 'name']).session(session);
-    if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
-      await session.abortTransaction();
-      return res.status(400).json({ msg: 'Cart is empty' });
-    }
-
-    // Filter out ordered items - only process active items
-    let activeItems = cart.items.filter(item => item.status !== 'ordered');
-
-    // SeerBit: order was already created at checkout; find it and confirm with order items from cart.
-    // Always require a valid reference for SeerBit; if none is provided, treat as unsuccessful.
+    // ── SeerBit fast-path ─────────────────────────────────────────────────────
+    // SeerBit orders are pre-created at checkout time. We need to verify the
+    // payment with SeerBit FIRST (with retry/backoff for the race condition where
+    // SeerBit redirects before their server finishes processing), then confirm the
+    // order. Cart state is secondary and must not block this path.
     if (paymentMethod === 'seerbit') {
       const rawRef = seerbitReference || reference;
       const refStr = typeof rawRef === 'string' ? rawRef : rawRef?.reference;
@@ -1416,12 +1515,36 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
         await session.abortTransaction();
         return res.status(400).json({ msg: 'SeerBit reference is required' });
       }
+
+      // 1. Look up the pre-created order (created during checkout).
       const existingOrder = await Order.findOne({ seerbitReference: refStr, buyer: userId }).session(session);
       if (!existingOrder) {
         await session.abortTransaction();
-        return res.status(404).json({ msg: 'Order not found for this payment' });
+        return res.status(404).json({ msg: 'Order not found for this SeerBit reference' });
       }
-      // Verify payment status with SeerBit backend before confirming order
+
+      // 2. Idempotency: order was already confirmed (e.g. via webhook before the
+      //    user's redirect arrived). Return success immediately.
+      if (existingOrder.paymentStatus === 'paid' && existingOrder.status === 'confirmed') {
+        await session.abortTransaction();
+        const orderObj = existingOrder.toObject();
+        orderObj._id = orderObj._id.toString();
+        console.log(`[SeerBit verify] order ${orderObj._id} already confirmed, returning success`);
+        return res.json({
+          _id: orderObj._id,
+          orderNumber: orderObj.orderNumber,
+          status: orderObj.status,
+          paymentStatus: orderObj.paymentStatus,
+          totalAmount: orderObj.totalAmount,
+          currency: orderObj.currency,
+          paymentMethod: orderObj.paymentMethod,
+          createdAt: orderObj.createdAt,
+          orderId: orderObj._id,
+          message: 'Payment already confirmed'
+        });
+      }
+
+      // 3. Verify payment with SeerBit (retries with backoff handle the race condition).
       let seerbitVerification;
       try {
         seerbitVerification = await seerbitService.verifyPayment(refStr);
@@ -1429,81 +1552,102 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
         await session.abortTransaction();
         return res.status(502).json({ msg: 'Could not verify payment with SeerBit', error: err.message });
       }
+      console.log(`[SeerBit verify] ref=${refStr} success=${seerbitVerification?.success} attempts=${seerbitVerification?.attempts} msg=${seerbitVerification?.message}`);
       if (!seerbitVerification || !seerbitVerification.success) {
         await session.abortTransaction();
         return res.status(400).json({ msg: seerbitVerification?.message || 'Payment not confirmed by SeerBit' });
       }
-      if (activeItems.length === 0) {
-        await session.abortTransaction();
-        return res.status(400).json({ msg: 'No active items in cart' });
-      }
-      const orderCurrency = existingOrder.currency || 'NGN';
-      const orderItems = [];
-      for (const cartItem of activeItems) {
-        const product = cartItem.product;
-        const productId = product && (product._id || product);
-        if (!productId) continue;
-        let variantData;
-        if (cartItem.variant && typeof cartItem.variant === 'object') {
-          variantData = {
-            variantId: cartItem.variant._id || cartItem.variant.variantId || null,
-            name: cartItem.variant.name || null,
-            attributes: cartItem.variant.attributes || [],
-            additionalPrice: cartItem.variant.additionalPrice || cartItem.variant.price || 0
-          };
-        }
-        const unitPrice = cartItem.unitPrice ?? (product && product.price);
-        const totalPrice = (unitPrice || 0) * (cartItem.quantity || 0);
-        const orderItemData = {
-          order: existingOrder._id,
-          product: productId,
-          specs: cartItem.specs && Array.isArray(cartItem.specs) ? cartItem.specs : [],
-          quantity: cartItem.quantity,
-          unitPrice: unitPrice || 0,
-          totalPrice,
-          currency: (cartItem.currency || product?.currency || orderCurrency) === 'USDT' ? 'USDC' : (cartItem.currency || product?.currency || orderCurrency),
-          status: 'ordered',
-          productImage: (product && product.images && product.images.length > 0) ? product.images[0] : '/images/desktop-1.png',
-          productName: (product && product.name) || ''
-        };
-        if (variantData) orderItemData.variant = variantData;
-        const orderItem = new OrderItem(orderItemData);
-        await orderItem.save({ session });
-        orderItems.push(orderItem._id);
-      }
+
+      // 4. If the order already has items (snapshot created at checkout), reuse them.
+      //    Otherwise fall back to building items from the current cart.
+      let cart = null;
+      let activeItems = [];
+      let orderItems = existingOrder.items && existingOrder.items.length > 0
+        ? existingOrder.items.map(i => (i._id || i))
+        : [];
+
       if (orderItems.length === 0) {
-        await session.abortTransaction();
-        return res.status(400).json({ msg: 'No valid cart items to confirm (missing product?)' });
+        cart = await Cart.findOne({ user: userId }).populate('items.product', ['price', 'images', 'currency', 'name', 'description']).session(session);
+        activeItems = cart ? (cart.items || []).filter(item => item.status !== 'ordered') : [];
+
+        const orderCurrency = existingOrder.currency || 'NGN';
+        for (const cartItem of activeItems) {
+          const product = cartItem.product;
+          const productId = product && (product._id || product);
+          if (!productId) continue;
+          let variantData;
+          if (cartItem.variant && typeof cartItem.variant === 'object') {
+            variantData = {
+              variantId: cartItem.variant._id || cartItem.variant.variantId || null,
+              name: cartItem.variant.name || null,
+              attributes: cartItem.variant.attributes || [],
+              additionalPrice: cartItem.variant.additionalPrice || cartItem.variant.price || 0
+            };
+          }
+          const unitPrice = cartItem.unitPrice ?? (product && product.price);
+          const totalPrice = (unitPrice || 0) * (cartItem.quantity || 0);
+          const orderItemData = {
+            order: existingOrder._id,
+            product: productId,
+            specs: cartItem.specs && Array.isArray(cartItem.specs) ? cartItem.specs : [],
+            quantity: cartItem.quantity,
+            unitPrice: unitPrice || 0,
+            totalPrice,
+            currency: (cartItem.currency || product?.currency || orderCurrency) === 'USDT' ? 'USDC' : (cartItem.currency || product?.currency || orderCurrency),
+            status: 'ordered',
+            productImage: (product && product.images && product.images.length > 0) ? product.images[0] : '/images/desktop-1.png',
+            productName: (product && product.name) || '',
+            productSnapshot: buildProductSnapshot(product, cartItem)
+          };
+          if (variantData) orderItemData.variant = variantData;
+          const orderItem = new OrderItem(orderItemData);
+          await orderItem.save({ session });
+          orderItems.push(orderItem._id);
+        }
+
+        if (orderItems.length > 0) {
+          existingOrder.items = orderItems;
+        }
+      } else {
+        // Items already exist from checkout snapshot; clear the cart items that match
+        cart = await Cart.findOne({ user: userId }).session(session);
+        activeItems = cart ? (cart.items || []) : [];
       }
-      existingOrder.items = orderItems;
+
       existingOrder.status = 'confirmed';
       existingOrder.paymentStatus = 'paid';
       existingOrder.paymentReference = refStr;
       await existingOrder.save({ session });
 
-      const payment = new Payment({
-        order: existingOrder._id,
-        user: req.user.id,
-        amount: existingOrder.totalAmount,
-        currency: existingOrder.currency,
-        method: 'seerbit',
-        status: 'completed',
-        paymentDate: new Date(),
-        reference: refStr,
-        seerbitReference: refStr
-      });
-      await payment.save({ session });
-      existingOrder.payments = [payment._id];
-      await existingOrder.save({ session });
+      // Avoid duplicate payment records
+      const existingPayment = await Payment.findOne({ seerbitReference: refStr }).session(session);
+      if (!existingPayment) {
+        const payment = new Payment({
+          order: existingOrder._id,
+          user: req.user.id,
+          amount: existingOrder.totalAmount,
+          currency: existingOrder.currency,
+          method: 'seerbit',
+          status: 'completed',
+          paymentDate: new Date(),
+          reference: refStr,
+          seerbitReference: refStr
+        });
+        await payment.save({ session });
+        existingOrder.payments = [payment._id];
+        await existingOrder.save({ session });
+      }
 
-      const orderedProductIds = new Set(activeItems.map(a => (a.productId || (a.product && (a.product._id || a.product)))?.toString()).filter(Boolean));
-      cart.items = (cart.items || []).map(item => {
-        const itemObj = item.toObject ? item.toObject() : { ...item };
-        const pid = (item.productId || (item.product && (item.product._id || item.product)))?.toString();
-        if (pid && orderedProductIds.has(pid)) itemObj.status = 'ordered';
-        return itemObj;
-      });
-      await cart.save({ session });
+      if (cart && activeItems.length > 0) {
+        const orderedProductIds = new Set(activeItems.map(a => (a.productId || (a.product && (a.product._id || a.product)))?.toString()).filter(Boolean));
+        cart.items = (cart.items || []).map(item => {
+          const itemObj = item.toObject ? item.toObject() : { ...item };
+          const pid = (item.productId || (item.product && (item.product._id || item.product)))?.toString();
+          if (pid && orderedProductIds.has(pid)) itemObj.status = 'ordered';
+          return itemObj;
+        });
+        await cart.save({ session });
+      }
 
       if (req.user && req.user.referredBy) {
         await awardReferralBonus(userId, existingOrder.totalAmount);
@@ -1532,9 +1676,20 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
         paymentMethod: orderObj.paymentMethod,
         createdAt: orderObj.createdAt,
         orderId: orderObj._id,
-        message: 'Order created and payment confirmed successfully'
+        message: 'Payment confirmed and order created successfully'
       });
     }
+
+    // ── Non-SeerBit paths ─────────────────────────────────────────────────────
+    // Get user's cart
+    let cart = await Cart.findOne({ user: userId }).populate('items.product', ['price', 'images', 'currency', 'name', 'description']).session(session);
+    if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ msg: 'Cart is empty' });
+    }
+
+    // Filter out ordered items - only process active items
+    let activeItems = cart.items.filter(item => item.status !== 'ordered');
 
     if (activeItems.length === 0) {
       await session.abortTransaction();
@@ -1634,7 +1789,8 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
         status: 'ordered',
         // Include product image data directly
         productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
-        productName: cartItem.product.name
+        productName: cartItem.product.name,
+        productSnapshot: buildProductSnapshot(cartItem.product, cartItem)
       };
 
       // Only include variant if it exists
@@ -1857,64 +2013,59 @@ const getOrdersPaginated = async (req, res) => {
         total: orderObj.totalAmount
       };
 
-      // Flatten product data for frontend compatibility
+      // Flatten product data for frontend compatibility.
+      // Prefer productSnapshot (stored at order time) so we don't depend on Product populate.
       if (orderObj.items && orderObj.items.length > 0) {
         const firstItem = orderObj.items[0];
-        orderObj.product = {
-          name: firstItem.productName || firstItem.product?.name || 'Product',
-          variant: firstItem.variant?.name || '',
-          quantity: firstItem.quantity,
-          price: firstItem.unitPrice,
-          images: firstItem.product?.images || []
-        };
-      }
+        const snap = firstItem.productSnapshot;
+        const PLACEHOLDER = '/images/desktop-1.png';
 
-      // Check if product data is incomplete and manually populate if needed
-      if (orderObj.items && orderObj.items.length > 0) {
-        for (let item of orderObj.items) {
-          if (item.product && (!item.product.images || item.product.images.length === 0 || !item.product.hasOwnProperty('images'))) {
-            try {
-              // Manually fetch the product with full data
-              const Product = require('../models/Product');
-              const fullProduct = await Product.findById(item.product._id).lean();
-              console.log('Manual population - fetched product:', {
-                id: fullProduct?._id,
-                name: fullProduct?.name,
-                hasImages: !!fullProduct?.images,
-                imagesLength: fullProduct?.images?.length || 0,
-                images: fullProduct?.images
-              });
-              if (fullProduct) {
-                item.product = {
-                  ...item.product,
-                  images: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images : ['/images/desktop-1.png'],
-                  variants: fullProduct.variants || [],
-                  firstImage: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images[0] : '/images/desktop-1.png'
-                };
-                console.log('Manually populated product:', item.product._id, 'with images:', item.product.images?.length || 0);
-              }
-            } catch (error) {
-              console.error('Error manually populating product:', error);
-            }
-          }
+        let itemImages = [];
+        if (snap?.images?.length > 0) {
+          itemImages = snap.images;
+        } else if (firstItem.productImage) {
+          itemImages = [firstItem.productImage];
+        } else if (firstItem.product?.images?.length > 0) {
+          itemImages = firstItem.product.images;
         }
+        const isPlaceholderOnly = !itemImages.length || (itemImages.length === 1 && itemImages[0] === PLACEHOLDER);
+        const productId = firstItem.product?._id || snap?.productId;
+        if (isPlaceholderOnly && productId) {
+          try {
+            const Product = require('../models/Product');
+            const fullProduct = await Product.findById(productId).lean();
+            if (fullProduct?.images?.length > 0) itemImages = fullProduct.images;
+          } catch (_) { /* ignore */ }
+        }
+        if (itemImages.length === 0) itemImages = [PLACEHOLDER];
+
+        const productName = (snap?.name && String(snap.name).trim()) || (firstItem.productName && String(firstItem.productName).trim()) || (firstItem.product?.name && String(firstItem.product.name).trim()) || 'Product';
+        const productDesc = snap?.description ?? firstItem.product?.description ?? null;
+
+        orderObj.product = {
+          name: productName,
+          description: productDesc,
+          variant: firstItem.variant?.name || '',
+          quantity: firstItem.quantity || 1,
+          price: snap?.price ?? firstItem.unitPrice ?? 0,
+          currency: firstItem.currency || snap?.currency || orderObj.currency || 'USDC',
+          images: itemImages,
+          productId: snap?.productId?.toString() || firstItem.product?._id?.toString() || null
+        };
+      } else {
+        // No items yet (safety net) — use a label that is not an order status
+        orderObj.product = {
+          name: 'Your order',
+          variant: '',
+          quantity: 1,
+          price: orderObj.totalAmount || 0,
+          currency: orderObj.currency || 'USDC',
+          images: ['/images/desktop-1.png']
+        };
       }
 
       return orderObj;
     }));
-
-    // Final fallback - ensure all products have images
-    ordersWithStringIds.forEach(order => {
-      if (order.items && order.items.length > 0) {
-        order.items.forEach(item => {
-          if (item.product && (!item.product.images || item.product.images.length === 0)) {
-            item.product.images = ['/images/desktop-1.png'];
-            item.product.firstImage = '/images/desktop-1.png';
-            console.log('Final fallback - added placeholder image for product:', item.product._id);
-          }
-        });
-      }
-    });
 
     const totalPages = Math.ceil(totalOrders / limitNum);
 
@@ -2098,7 +2249,7 @@ const processUSDCWalletPayment = async (req, res) => {
     }
 
     // Get user's cart
-    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price', 'images', 'currency', 'name']);
+    let cart = await Cart.findOne({ user: req.user.id }).populate('items.product', ['price', 'images', 'currency', 'name', 'description']);
     if (!cart || cart.items.length === 0) {
       return res.status(400).json({ msg: 'Cart is empty' });
     }
@@ -2176,7 +2327,8 @@ const processUSDCWalletPayment = async (req, res) => {
         currency: (cartItem.currency || cartItem.product?.currency || currency) === 'USDT' ? 'USDC' : (cartItem.currency || cartItem.product?.currency || currency),
         status: 'ordered',
         productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
-        productName: cartItem.product.name
+        productName: cartItem.product.name,
+        productSnapshot: buildProductSnapshot(cartItem.product, cartItem)
       });
       await orderItem.save();
       orderItems.push(orderItem._id);
@@ -2301,7 +2453,7 @@ const createCryptoPaymentOrder = async (req, res) => {
 
     // Get user's cart
     let cart = await Cart.findOne({ user: req.user.id })
-      .populate('items.product', ['price', 'images', 'currency', 'name', 'stock'])
+      .populate('items.product', ['price', 'images', 'currency', 'name', 'stock', 'description'])
       .session(session);
     
     if (!cart || cart.items.length === 0) {
@@ -2507,7 +2659,8 @@ const createCryptoPaymentOrder = async (req, res) => {
         currency: itemCurrency,
         status: 'ordered',
         productImage: cartItem.product.images && cartItem.product.images.length > 0 ? cartItem.product.images[0] : '/images/desktop-1.png',
-        productName: cartItem.product.name
+        productName: cartItem.product.name,
+        productSnapshot: buildProductSnapshot(cartItem.product, cartItem)
       };
 
       if (variantData) {
@@ -2843,6 +2996,56 @@ const confirmCryptoPayment = async (req, res) => {
 };
 
 /**
+ * @desc    Re-initialize a SeerBit payment for a pending/unpaid order.
+ *          Generates a fresh reference, updates the order, returns the redirect link.
+ * @route   POST /api/orders/:id/seerbit-pay
+ * @access  Private
+ */
+const reinitializeSeerbitPayment = async (req, res) => {
+  try {
+    const userId = (req.user && (req.user._id || req.user.id))?.toString?.() || req.user?.id;
+    const { id } = req.params;
+
+    const order = await Order.findOne({ _id: id, buyer: userId });
+    if (!order) return res.status(404).json({ msg: 'Order not found' });
+    if (order.paymentMethod !== 'seerbit') return res.status(400).json({ msg: 'Order is not a SeerBit order' });
+    if (order.paymentStatus === 'paid') return res.status(400).json({ msg: 'Order is already paid' });
+
+    // Generate a fresh reference so SeerBit accepts it (references are single-use)
+    const seerbitReference = seerbitService.generateReference();
+    const NGN_PER_USD = 1500;
+    const totalAmount = order.totalAmount || 0;
+    const currency = order.currency || 'NGN';
+    const amountInNGN = currency === 'NGN' ? totalAmount : totalAmount * NGN_PER_USD;
+    const amountForSeerbit = String(Math.round(amountInNGN));
+
+    const callbackUrl = process.env.FRONTEND_URL
+      ? `${process.env.FRONTEND_URL.replace(/\/$/, '')}/checkout/success?reference=${encodeURIComponent(seerbitReference)}`
+      : `${req.protocol}://${req.get('host')}/api/orders/seerbit/callback?reference=${encodeURIComponent(seerbitReference)}`;
+
+    const seerbitResult = await seerbitService.initializePayment({
+      publicKey: process.env.SEERBIT_PUBLIC_KEY,
+      amount: amountForSeerbit,
+      currency: 'NGN',
+      country: 'NG',
+      paymentReference: seerbitReference,
+      email: req.user.email,
+      fullName: req.user.name || req.user.email,
+      callbackUrl
+    });
+
+    order.seerbitReference = seerbitReference;
+    order.paymentReference = seerbitReference;
+    await order.save();
+
+    return res.json({ redirectLink: seerbitResult.redirectLink, reference: seerbitReference });
+  } catch (err) {
+    console.error('[reinitializeSeerbitPayment]', err.message);
+    return res.status(500).json({ msg: err.message || 'Could not initialize SeerBit payment' });
+  }
+};
+
+/**
  * GET /api/orders/seerbit/callback
  * SeerBit redirects here after payment (when callbackUrl is backend). No auth.
  * Redirects user to frontend success page with ?reference= so frontend can call verify-payment.
@@ -2876,6 +3079,7 @@ module.exports = {
   getOrderByNumber,
   getOrderByPaystackReference,
   verifyPaymentAndCreateOrder,
+  reinitializeSeerbitPayment,
   processUSDCWalletPayment,
   createCryptoPaymentOrder,
   checkCryptoPaymentStatus,

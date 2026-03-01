@@ -2,14 +2,13 @@ const currencyExchangeService = require('../services/currencyExchangeService');
 
 /**
  * GET /api/currency/rates
- * Returns platform exchange rates (from DB, updated by middleware every 24h).
- * Frontend uses this for all conversion; no exchange rate logic on frontend.
+ * Returns platform exchange rates. Rates come from provider (ExchangeRate-API); hardcoded only on failure.
  */
 async function getRates(req, res) {
   try {
-    const fromCache = !!req.platformRates;
-    const rates = req.platformRates || await currencyExchangeService.getRates();
-    console.log('[currency] GET /api/currency/rates: serving rates', fromCache ? '(from middleware cache)' : '(from getRates())');
+    const rates = req.platformRates || await currencyExchangeService.getOrCreateRates();
+    const fromProvider = !!req.platformRates;
+    console.log('[currency] GET /api/currency/rates: serving rates', fromProvider ? '(from middleware cache)' : '(from getOrCreateRates)');
     res.json({
       base: 'USD',
       rates: currencyExchangeService.normalizeRates(rates),
@@ -20,12 +19,7 @@ async function getRates(req, res) {
     res.status(500).json({
       base: 'USD',
       rates: currencyExchangeService.normalizeRates({
-        USDC: 1,
-        USD: 1,
-        NGN: 1500,
-        EUR: 0.92,
-        GHS: 15,
-        GHC: 15
+        USDC: 1, USD: 1, NGN: 1500, EUR: 0.92, GHS: 15
       })
     });
   }
@@ -41,16 +35,17 @@ function getMe(req, res) {
   res.json({ currency: normalized });
 }
 
-const ALLOWED_CURRENCIES = ['USDC', 'USD', 'NGN', 'EUR', 'GHS', 'GHC'];
+const ALLOWED_CURRENCIES = ['USDC', 'USD', 'NGN', 'EUR', 'GHS'];
 
 /**
  * PUT /api/currency/me
- * Set session currency (24h). Body: { currency: 'NGN' | 'USD' | 'USDC' | 'EUR' }.
- * For guests this sets session; for authenticated users this updates session cache (user prefs are source of truth on next load).
+ * Set session currency (24h). Body: { currency: 'NGN' | 'USD' | 'USDC' | 'EUR' | 'GHS' }.
+ * GHC is accepted and normalized to GHS (correct ISO 4217 code for Ghana Cedi).
  */
 function setMe(req, res) {
   let raw = (req.body && req.body.currency) ? String(req.body.currency).toUpperCase().trim() : '';
   if (raw === 'USDT') raw = 'USDC';
+  if (raw === 'GHC') raw = 'GHS';
   const value = ALLOWED_CURRENCIES.includes(raw) ? raw : 'USD';
   if (req.session) {
     req.session.currency = value;
