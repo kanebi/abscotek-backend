@@ -9,6 +9,7 @@ const User = require('../models/User');
 const PaystackService = require('../services/paystackService');
 const Paystack = require('paystack-api')(process.env.PAYSTACK_SECRET_KEY);
 const seerbitService = require('../services/seerbitService');
+const currencyExchangeService = require('../services/currencyExchangeService');
 const { reduceStockOnOrder } = require('../utils/stockAnalysis');
 
 /** Build productSnapshot for OrderItem from product (and optional cartItem for variant images). */
@@ -316,7 +317,7 @@ const checkoutFromCart = async (req, res) => {
           quantity: cartItem.quantity,
           unitPrice,
           totalPrice: unitPrice * cartItem.quantity,
-          currency: (productCurrency === 'USDT' ? 'USDC' : productCurrency),
+          currency: currency,
           status: 'ordered',
           productImage: (product?.images?.length > 0) ? product.images[0] : '/images/desktop-1.png',
           productName: product?.name || '',
@@ -331,8 +332,15 @@ const checkoutFromCart = async (req, res) => {
       await order.save();
 
       const seerbitReference = seerbitService.generateReference();
-      // totalAmount is already in order currency; SeerBit expects NGN in whole units
-      const amountInNGN = currency === 'NGN' ? totalAmount : totalAmount * NGN_PER_USD;
+      // totalAmount is in order currency; SeerBit expects NGN in whole units — use platform rates
+      let amountInNGN = totalAmount;
+      try {
+        const rates = await currencyExchangeService.getOrCreateRates();
+        amountInNGN = currencyExchangeService.convert(totalAmount, currency, 'NGN', rates);
+      } catch (e) {
+        amountInNGN = currency === 'NGN' ? totalAmount : totalAmount * NGN_PER_USD;
+        console.warn('[SeerBit] rate fetch failed, using fallback:', e?.message);
+      }
       const amountForSeerbit = String(Math.round(amountInNGN));
       if (process.env.NODE_ENV !== 'production') {
         console.log('[SeerBit] amount', { subTotalInOrderCurrency, deliveryFeeInOrderCurrency, totalAmount, currency, amountInNGN, amountForSeerbit });
@@ -785,80 +793,64 @@ const getOrders = async (req, res) => {
         total: orderObj.calculatedTotal || orderObj.totalAmount
       };
 
-      // Ensure all items have unitPrice and process items for frontend
+      // Ensure all items have unitPrice and enrich from productSnapshot (same as getOrdersPaginated / getOrderById)
+      const PLACEHOLDER = '/images/desktop-1.png';
       if (orderObj.items && orderObj.items.length > 0) {
-        // Process all items to ensure unitPrice is available and product.price reflects unitPrice
-        orderObj.items = orderObj.items.map(item => {
+        orderObj.items = await Promise.all(orderObj.items.map(async (item) => {
           const itemObj = item.toObject ? item.toObject() : item;
-          // Ensure unitPrice is set (it should be from OrderItem schema)
-          if (!itemObj.unitPrice && itemObj.price) {
-            itemObj.unitPrice = itemObj.price;
-          }
-          // Ensure product.price reflects unitPrice if variant is selected (for frontend compatibility)
-          if (itemObj.product && itemObj.unitPrice) {
-            itemObj.product.price = itemObj.unitPrice;
-          }
-          return itemObj;
-        });
-        
-        // Flatten product data for frontend compatibility (first item for legacy support)
-        const firstItem = orderObj.items[0];
-        orderObj.product = {
-          name: firstItem.productName || firstItem.product?.name || 'Product',
-          variant: firstItem.variant?.name || '',
-          quantity: firstItem.quantity,
-          price: firstItem.unitPrice || firstItem.price,
-          unitPrice: firstItem.unitPrice || firstItem.price,
-          images: firstItem.product?.images || []
-        };
-      }
-
-      // Check if product data is incomplete and manually populate if needed
-      if (orderObj.items && orderObj.items.length > 0) {
-        for (let item of orderObj.items) {
-          if (item.product && (!item.product.images || item.product.images.length === 0 || !item.product.hasOwnProperty('images'))) {
+          if (!itemObj.unitPrice && itemObj.price) itemObj.unitPrice = itemObj.price;
+          const snap = itemObj.productSnapshot;
+          let images = (snap?.images?.length > 0) ? snap.images : (itemObj.productImage ? [itemObj.productImage] : (itemObj.product?.images?.length > 0 ? itemObj.product.images : [PLACEHOLDER]));
+          if (images.length === 0) images = [PLACEHOLDER];
+          const productId = snap?.productId || itemObj.product?._id;
+          if ((!images.length || (images.length === 1 && images[0] === PLACEHOLDER)) && productId) {
             try {
-              // Manually fetch the product with full data
-              const Product = require('../models/Product');
-              const fullProduct = await Product.findById(item.product._id).lean();
-              console.log('Manual population - fetched product:', {
-                id: fullProduct?._id,
-                name: fullProduct?.name,
-                hasImages: !!fullProduct?.images,
-                imagesLength: fullProduct?.images?.length || 0,
-                images: fullProduct?.images
-              });
-              if (fullProduct) {
-                item.product = {
-                  ...item.product,
-                  images: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images : ['/images/desktop-1.png'],
-                  variants: fullProduct.variants || [],
-                  firstImage: fullProduct.images && fullProduct.images.length > 0 ? fullProduct.images[0] : '/images/desktop-1.png'
-                };
-                console.log('Manually populated product:', item.product._id, 'with images:', item.product.images?.length || 0);
-              }
-            } catch (error) {
-              console.error('Error manually populating product:', error);
-            }
+              const fullProduct = await Product.findById(productId).lean();
+              if (fullProduct?.images?.length > 0) images = fullProduct.images;
+            } catch (_) { /* ignore */ }
           }
+          if (images.length === 0) images = [PLACEHOLDER];
+          const name = (snap?.name && String(snap.name).trim()) || itemObj.productName || itemObj.product?.name || 'Product';
+          const price = snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price;
+          const itemCurrency = itemObj.currency || snap?.currency || orderObj.currency || 'USDC';
+          itemObj.product = {
+            _id: productId,
+            name,
+            price: price ?? itemObj.unitPrice,
+            images,
+            currency: itemCurrency
+          };
+          return itemObj;
+        }));
+
+        const firstItem = orderObj.items[0];
+        const snap = firstItem.productSnapshot;
+        let itemImages = (snap?.images?.length > 0) ? snap.images : (firstItem.productImage ? [firstItem.productImage] : (firstItem.product?.images?.length > 0 ? firstItem.product.images : [PLACEHOLDER]));
+        if (itemImages.length === 0) itemImages = [PLACEHOLDER];
+        const productId = firstItem.product?._id || snap?.productId;
+        if ((!itemImages.length || (itemImages.length === 1 && itemImages[0] === PLACEHOLDER)) && productId) {
+          try {
+            const fullProduct = await Product.findById(productId).lean();
+            if (fullProduct?.images?.length > 0) itemImages = fullProduct.images;
+          } catch (_) { /* ignore */ }
         }
+        if (itemImages.length === 0) itemImages = [PLACEHOLDER];
+
+        const productName = (snap?.name && String(snap.name).trim()) || firstItem.productName || firstItem.product?.name || 'Product';
+        orderObj.product = {
+          name: productName,
+          variant: firstItem.variant?.name || '',
+          quantity: firstItem.quantity || 1,
+          price: snap?.price ?? firstItem.unitPrice ?? firstItem.price,
+          unitPrice: firstItem.unitPrice ?? firstItem.price,
+          currency: firstItem.currency || snap?.currency || orderObj.currency || 'USDC',
+          images: itemImages,
+          productId: snap?.productId?.toString() || firstItem.product?._id?.toString() || null
+        };
       }
 
       return orderObj;
     }));
-
-    // Final fallback - ensure all products have images
-    ordersWithStringIds.forEach(order => {
-      if (order.items && order.items.length > 0) {
-        order.items.forEach(item => {
-          if (item.product && (!item.product.images || item.product.images.length === 0)) {
-            item.product.images = ['/images/desktop-1.png'];
-            item.product.firstImage = '/images/desktop-1.png';
-            console.log('Final fallback - added placeholder image for product:', item.product._id);
-          }
-        });
-      }
-    });
 
     console.log(`Found ${ordersWithStringIds.length} orders for user`);
     res.json(ordersWithStringIds);
@@ -955,40 +947,65 @@ const getOrderById = async (req, res) => {
       total: orderObj.calculatedTotal || orderObj.totalAmount
     };
 
-    // Ensure all items have unitPrice and process items for frontend
+    // Ensure all items have unitPrice and process items for frontend (snapshot-first; fallback to Product fetch for images)
+    const PLACEHOLDER_IMG = '/images/desktop-1.png';
     if (orderObj.items && orderObj.items.length > 0) {
-      // Enrich each item with product display from productSnapshot (no populate needed)
-      orderObj.items = orderObj.items.map(item => {
+      orderObj.items = await Promise.all(orderObj.items.map(async (item) => {
         const itemObj = item.toObject ? item.toObject() : item;
         if (!itemObj.unitPrice && itemObj.price) itemObj.unitPrice = itemObj.price;
         const snap = itemObj.productSnapshot;
-        const images = (snap?.images?.length > 0) ? snap.images : (itemObj.productImage ? [itemObj.productImage] : (itemObj.product?.images?.length > 0 ? itemObj.product.images : ['/images/desktop-1.png']));
-        const name = snap?.name || itemObj.productName || itemObj.product?.name || 'Product';
+        let images = (snap?.images?.length > 0) ? snap.images : (itemObj.productImage ? [itemObj.productImage] : (itemObj.product?.images?.length > 0 ? itemObj.product.images : [PLACEHOLDER_IMG]));
+        if (images.length === 0) images = [PLACEHOLDER_IMG];
+        const productId = snap?.productId || itemObj.product?._id;
+        if ((!images.length || (images.length === 1 && images[0] === PLACEHOLDER_IMG)) && productId) {
+          try {
+            const fullProduct = await Product.findById(productId).select('images').lean();
+            if (fullProduct?.images?.length > 0) images = fullProduct.images;
+          } catch (_) { /* ignore */ }
+        }
+        if (images.length === 0) images = [PLACEHOLDER_IMG];
+        const name = (snap?.name && String(snap.name).trim()) || itemObj.productName || itemObj.product?.name || 'Product';
         const description = snap?.description ?? itemObj.product?.description ?? null;
-        const price = snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price;
+        // Use stored unitPrice; use order currency so amount is never wrong (order was placed in one currency)
+        const priceRaw = itemObj.unitPrice ?? snap?.price ?? itemObj.product?.price;
+        const price = (typeof priceRaw === 'number' && !Number.isNaN(priceRaw)) ? priceRaw : (Number(priceRaw) || 0);
+        const orderCurrency = orderObj.currency || 'USDC';
         itemObj.product = {
-          _id: snap?.productId || itemObj.product?._id,
+          _id: productId,
           name,
           description,
-          price: price ?? itemObj.unitPrice,
+          price,
           images,
-          currency: snap?.currency || itemObj.currency
+          currency: orderCurrency
         };
+        itemObj.currency = orderCurrency;
         return itemObj;
-      });
+      }));
 
       const firstItem = orderObj.items[0];
       const snap = firstItem.productSnapshot;
+      let firstImages = (snap?.images?.length > 0) ? snap.images : (firstItem.productImage ? [firstItem.productImage] : (firstItem.product?.images?.length > 0 ? firstItem.product.images : [PLACEHOLDER_IMG]));
+      if (firstImages.length === 0) firstImages = [PLACEHOLDER_IMG];
+      const firstProductId = snap?.productId || firstItem.product?._id;
+      if ((!firstImages.length || (firstImages.length === 1 && firstImages[0] === PLACEHOLDER_IMG)) && firstProductId) {
+        try {
+          const fullProduct = await Product.findById(firstProductId).select('images').lean();
+          if (fullProduct?.images?.length > 0) firstImages = fullProduct.images;
+        } catch (_) { /* ignore */ }
+      }
+      if (firstImages.length === 0) firstImages = [PLACEHOLDER_IMG];
+      const firstPriceRaw = firstItem.unitPrice ?? firstItem.price ?? snap?.price;
+      const firstPrice = (typeof firstPriceRaw === 'number' && !Number.isNaN(firstPriceRaw)) ? firstPriceRaw : (Number(firstPriceRaw) || 0);
       orderObj.product = {
         name: (snap?.name && String(snap.name).trim()) || firstItem.productName || firstItem.product?.name || 'Product',
         variant: firstItem.variant?.name || '',
         quantity: firstItem.quantity,
-        price: firstItem.unitPrice || firstItem.price,
-        unitPrice: firstItem.unitPrice || firstItem.price,
+        price: firstPrice,
+        unitPrice: firstPrice,
         description: snap?.description ?? firstItem.product?.description ?? null,
-        images: (snap?.images?.length > 0) ? snap.images : (firstItem.productImage ? [firstItem.productImage] : (firstItem.product?.images?.length > 0 ? firstItem.product.images : ['/images/desktop-1.png'])),
+        images: firstImages,
         productId: snap?.productId?.toString() || firstItem.product?._id?.toString(),
-        currency: firstItem.currency || snap?.currency || orderObj.currency || 'USDC'
+        currency: orderObj.currency || 'USDC'
       };
     }
 
@@ -3011,12 +3028,25 @@ const reinitializeSeerbitPayment = async (req, res) => {
     if (order.paymentMethod !== 'seerbit') return res.status(400).json({ msg: 'Order is not a SeerBit order' });
     if (order.paymentStatus === 'paid') return res.status(400).json({ msg: 'Order is already paid' });
 
+    // Allow retry for pending, failed, or cancelled so user can pay without creating a new order
+    const retryableStatuses = ['pending', 'failed', 'cancelled', 'refunded'];
+    if (!retryableStatuses.includes((order.status || '').toLowerCase())) {
+      return res.status(400).json({ msg: 'This order cannot be paid again. Use a new checkout for a new order.' });
+    }
+
     // Generate a fresh reference so SeerBit accepts it (references are single-use)
     const seerbitReference = seerbitService.generateReference();
-    const NGN_PER_USD = 1500;
     const totalAmount = order.totalAmount || 0;
     const currency = order.currency || 'NGN';
-    const amountInNGN = currency === 'NGN' ? totalAmount : totalAmount * NGN_PER_USD;
+    let amountInNGN = totalAmount;
+    try {
+      const rates = await currencyExchangeService.getOrCreateRates();
+      amountInNGN = currencyExchangeService.convert(totalAmount, currency, 'NGN', rates);
+    } catch (e) {
+      const NGN_PER_USD = 1500;
+      amountInNGN = currency === 'NGN' ? totalAmount : totalAmount * NGN_PER_USD;
+      console.warn('[SeerBit reinit] rate fetch failed, using fallback:', e?.message);
+    }
     const amountForSeerbit = String(Math.round(amountInNGN));
 
     const callbackUrl = process.env.FRONTEND_URL
@@ -3036,6 +3066,10 @@ const reinitializeSeerbitPayment = async (req, res) => {
 
     order.seerbitReference = seerbitReference;
     order.paymentReference = seerbitReference;
+    if (['failed', 'cancelled', 'refunded'].includes((order.status || '').toLowerCase())) {
+      order.status = 'pending';
+      order.paymentStatus = 'unpaid';
+    }
     await order.save();
 
     return res.json({ redirectLink: seerbitResult.redirectLink, reference: seerbitReference });

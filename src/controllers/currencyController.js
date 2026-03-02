@@ -11,14 +11,14 @@ async function getRates(req, res) {
     console.log('[currency] GET /api/currency/rates: serving rates', fromProvider ? '(from middleware cache)' : '(from getOrCreateRates)');
     res.json({
       base: 'USD',
-      rates: currencyExchangeService.normalizeRates(rates),
+      rates: currencyExchangeService.applyMarkup(rates),
       updatedAt: new Date().toISOString()
     });
   } catch (err) {
     console.error('getRates:', err);
     res.status(500).json({
       base: 'USD',
-      rates: currencyExchangeService.normalizeRates({
+      rates: currencyExchangeService.applyMarkup({
         USDC: 1, USD: 1, NGN: 1500, EUR: 0.92, GHS: 15
       })
     });

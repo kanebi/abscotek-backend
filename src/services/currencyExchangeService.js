@@ -14,12 +14,28 @@ const DEFAULT_RATES = {
   GHS: 15
 };
 
+/** Platform margin: add 1.8% to provider rates when serving (except base USD/USDC). */
+const RATE_MARKUP_PERCENT = 1.8;
+const RATE_MARKUP_MULTIPLIER = 1 + RATE_MARKUP_PERCENT / 100;
+
 function normalizeRates(rates) {
   const r = { ...rates };
   // Only canonical codes: GHS (not GHC). Alias USDC from USD if missing.
   if (r.USD !== undefined && r.USDC === undefined) r.USDC = r.USD;
   if (r.USDC === undefined) r.USDC = 1;
   // Do not add GHC; API returns only ISO 4217 codes (GHS for Ghana Cedi).
+  return r;
+}
+
+/** Apply platform markup (RATE_MARKUP_PERCENT) to rates except base USD/USDC. Use when returning to API or for conversions. */
+function applyMarkup(rates) {
+  const r = { ...normalizeRates(rates) };
+  for (const [key, val] of Object.entries(r)) {
+    if (key === 'USD' || key === 'USDC') continue;
+    if (typeof val === 'number' && !Number.isNaN(val)) {
+      r[key] = val * RATE_MARKUP_MULTIPLIER;
+    }
+  }
   return r;
 }
 
@@ -80,7 +96,7 @@ async function getOrCreateRates() {
   } else {
     console.log('[currency] Serving conversion rates from DB cache (age ms:', age, ')');
   }
-  return doc.rates;
+  return applyMarkup(doc.rates);
 }
 
 /**
@@ -92,10 +108,10 @@ async function getRates() {
   const doc = await CurrencyExchangeRate.findOne().sort({ updatedAt: -1 }).lean();
   if (doc && doc.rates) {
     console.log('[currency] getRates: from DB, updatedAt:', doc.updatedAt);
-    return normalizeRates(doc.rates);
+    return applyMarkup(doc.rates);
   }
   console.log('[currency] getRates: no document, using hardcoded fallback');
-  return normalizeRates(DEFAULT_RATES);
+  return applyMarkup(DEFAULT_RATES);
 }
 
 /**
@@ -115,5 +131,6 @@ module.exports = {
   getRates,
   convert,
   normalizeRates,
+  applyMarkup,
   RATE_TTL_MS
 };
