@@ -5,8 +5,8 @@ const EXCHANGE_RATE_API_KEY = process.env.EXCHANGE_RATE_API_KEY || '798a7fb97cb7
 const EXCHANGE_RATE_API_BASE = 'https://v6.exchangerate-api.com/v6';
 
 const RATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-/** Platform margin: add 1.5% to provider rates (except base USD/USDC). */
-const RATE_MARKUP_FACTOR = 1.015;
+/** Platform markup: add 1.8% to provider rates (e.g. 1500 → 1527 for NGN per USD). */
+const RATE_MARKUP_FACTOR = 1.018;
 
 /** Fallback only when provider request fails or a rate is missing from response. */
 const DEFAULT_RATES = {
@@ -17,16 +17,17 @@ const DEFAULT_RATES = {
   GHS: 15
 };
 
-/** Apply 1.5% to rates except base (USD/USDC). Call only when first receiving from provider or using defaults. */
-function applyPlatformMarkup(rates) {
-  const r = { ...rates };
-  for (const key of Object.keys(r)) {
-    if (key === 'USD' || key === 'USDC') continue;
-    if (typeof r[key] === 'number' && !Number.isNaN(r[key])) {
-      r[key] = r[key] * RATE_MARKUP_FACTOR;
+/** Apply 1.8% platform markup to rates (except USD/USDC base). Call once when ingesting provider/fallback rates. */
+function applyRateMarkup(rates) {
+  const out = { ...rates };
+  const baseKeys = ['USD', 'USDC'];
+  for (const key of Object.keys(out)) {
+    if (key && out[key] != null && !baseKeys.includes(key)) {
+      const num = Number(out[key]);
+      if (!Number.isNaN(num)) out[key] = num * RATE_MARKUP_FACTOR;
     }
   }
-  return r;
+  return out;
 }
 
 function normalizeRates(rates) {
@@ -34,7 +35,6 @@ function normalizeRates(rates) {
   // Only canonical codes: GHS (not GHC). Alias USDC from USD if missing.
   if (r.USD !== undefined && r.USDC === undefined) r.USDC = r.USD;
   if (r.USDC === undefined) r.USDC = 1;
-  // Do not add GHC; API returns only ISO 4217 codes (GHS for Ghana Cedi).
   return r;
 }
 
@@ -49,19 +49,19 @@ async function fetchRatesFromApi() {
     const { data } = await axios.get(url, { timeout: 10000 });
     if (data?.result === 'success' && data?.conversion_rates) {
       const r = data.conversion_rates;
-      const raw = normalizeRates({
+      const raw = {
         USDC: 1,
         USD: 1,
         NGN: r.NGN ?? DEFAULT_RATES.NGN,
         EUR: r.EUR ?? DEFAULT_RATES.EUR,
         GHS: r.GHS ?? DEFAULT_RATES.GHS
-      });
-      return applyPlatformMarkup(raw);
+      };
+      return normalizeRates(applyRateMarkup(raw));
     }
   } catch (err) {
     console.warn('[currency] ExchangeRate-API fetch failed:', err.message);
   }
-  return applyPlatformMarkup(normalizeRates(DEFAULT_RATES));
+  return normalizeRates(applyRateMarkup(DEFAULT_RATES));
 }
 
 /**
@@ -110,7 +110,7 @@ async function getRates() {
     return normalizeRates(doc.rates);
   }
   console.log('[currency] getRates: no document, using hardcoded fallback');
-  return applyPlatformMarkup(normalizeRates(DEFAULT_RATES));
+  return normalizeRates(DEFAULT_RATES);
 }
 
 /**
@@ -130,5 +130,6 @@ module.exports = {
   getRates,
   convert,
   normalizeRates,
+  applyRateMarkup,
   RATE_TTL_MS
 };
