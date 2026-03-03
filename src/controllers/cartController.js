@@ -74,15 +74,6 @@ const getCart = async (req, res) => {
           const Product = require('../models/Product');
           const fullProduct = await Product.findById(item.productId).select('name price images firstImage').lean();
 
-          console.log('Backend - Product data for cart item:', {
-            productId: item.productId,
-            productName: fullProduct?.name,
-            hasImages: !!fullProduct?.images,
-            imagesLength: fullProduct?.images?.length || 0,
-            images: fullProduct?.images,
-            firstImage: fullProduct?.firstImage
-          });
-
           // Use unitPrice as the primary price (includes variant price if variant is selected)
           // This ensures the product.price reflects the actual price for this cart item
           const itemPrice = item.unitPrice || fullProduct?.price || item.product?.price || item.price;
@@ -103,13 +94,6 @@ const getCart = async (req, res) => {
             price: itemPrice // Use unitPrice (includes variant) as item price
           };
 
-          console.log('Backend - Processed cart item:', {
-            productId: processedItem.productId,
-            name: processedItem.name,
-            image: processedItem.image,
-            imagesCount: processedItem.images?.length || 0
-          });
-
           return processedItem;
         }));
 
@@ -128,16 +112,6 @@ const getCart = async (req, res) => {
       });
       await cart.save();
     }
-
-    console.log('Backend - Final cart response:', {
-      itemCount: cart.items?.length || 0,
-      firstItem: cart.items?.[0] ? {
-        name: cart.items[0].name,
-        hasImage: !!cart.items[0].image,
-        image: cart.items[0].image,
-        imagesCount: cart.items[0].images?.length || 0
-      } : null
-    });
 
     res.json(cart);
   } catch (err) {

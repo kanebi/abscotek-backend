@@ -4,9 +4,10 @@ const CurrencyExchangeRate = require('../models/CurrencyExchangeRate');
 const EXCHANGE_RATE_API_KEY = process.env.EXCHANGE_RATE_API_KEY || '798a7fb97cb75d0e80d87765';
 const EXCHANGE_RATE_API_BASE = 'https://v6.exchangerate-api.com/v6';
 
-const RATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-/** Platform markup: add 1.8% to provider rates (e.g. 1500 → 1527 for NGN per USD). */
-const RATE_MARKUP_FACTOR = 1.018;
+const RATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours auto-cache; refresh from provider when stale
+/** Platform margin: we keep 1.85%, so customer pays rate * 1.0185 (higher fiat per USD). */
+const RATE_MARGIN_PERCENT = 1.85;
+const RATE_MARGIN_MULTIPLIER = 1 + RATE_MARGIN_PERCENT / 100;
 
 /** Fallback only when provider request fails or a rate is missing from response. */
 const DEFAULT_RATES = {
@@ -17,14 +18,29 @@ const DEFAULT_RATES = {
   GHS: 15
 };
 
-/** Apply 1.8% platform markup to rates (except USD/USDC base). Call once when ingesting provider/fallback rates. */
-function applyRateMarkup(rates) {
+/**
+ * Ensure no rate is 0, NaN, or invalid (would break conversion and show 0 on frontend).
+ */
+function sanitizeRates(rates) {
+  const out = { ...rates };
+  for (const [key, value] of Object.entries(out)) {
+    const num = typeof value === 'number' ? value : Number(value);
+    if (value == null || Number.isNaN(num) || num <= 0) {
+      out[key] = DEFAULT_RATES[key] ?? (key === 'USD' || key === 'USDC' ? 1 : 1);
+    }
+  }
+  return out;
+}
+
+/**
+ * Apply platform margin (1.85%): multiply non-base rates so customer pays a bit more fiat per USD.
+ */
+function applyMarkup(rates) {
   const out = { ...rates };
   const baseKeys = ['USD', 'USDC'];
-  for (const key of Object.keys(out)) {
-    if (key && out[key] != null && !baseKeys.includes(key)) {
-      const num = Number(out[key]);
-      if (!Number.isNaN(num)) out[key] = num * RATE_MARKUP_FACTOR;
+  for (const [key, value] of Object.entries(out)) {
+    if (value != null && typeof value === 'number' && value > 0 && !baseKeys.includes(key)) {
+      out[key] = value * RATE_MARGIN_MULTIPLIER;
     }
   }
   return out;
@@ -35,6 +51,7 @@ function normalizeRates(rates) {
   // Only canonical codes: GHS (not GHC). Alias USDC from USD if missing.
   if (r.USD !== undefined && r.USDC === undefined) r.USDC = r.USD;
   if (r.USDC === undefined) r.USDC = 1;
+  // Do not add GHC; API returns only ISO 4217 codes (GHS for Ghana Cedi).
   return r;
 }
 
@@ -49,30 +66,42 @@ async function fetchRatesFromApi() {
     const { data } = await axios.get(url, { timeout: 10000 });
     if (data?.result === 'success' && data?.conversion_rates) {
       const r = data.conversion_rates;
-      const raw = {
+      const raw = sanitizeRates({
         USDC: 1,
         USD: 1,
         NGN: r.NGN ?? DEFAULT_RATES.NGN,
         EUR: r.EUR ?? DEFAULT_RATES.EUR,
         GHS: r.GHS ?? DEFAULT_RATES.GHS
-      };
-      return normalizeRates(applyRateMarkup(raw));
+      });
+      const rates = normalizeRates(applyMarkup(raw));
+      console.log('[currency] provider rates (raw)', {
+        NGN: raw.NGN,
+        EUR: raw.EUR,
+        GHS: raw.GHS
+      });
+      console.log('[currency] platform rates with margin', {
+        NGN: rates.NGN,
+        EUR: rates.EUR,
+        GHS: rates.GHS
+      });
+      return rates;
     }
   } catch (err) {
     console.warn('[currency] ExchangeRate-API fetch failed:', err.message);
   }
-  return normalizeRates(applyRateMarkup(DEFAULT_RATES));
+  return normalizeRates(applyMarkup(sanitizeRates(DEFAULT_RATES)));
 }
 
 /**
- * Get or create the single platform rates document. If missing or older than 24h, refresh from provider.
+ * Get or create the single platform rates document. Refreshes from provider when older than RATE_TTL_MS (24h).
  * Returns provider rates; uses hardcoded fallback only when provider fetch fails.
  */
 async function getOrCreateRates() {
   const now = new Date();
   let doc = await CurrencyExchangeRate.findOne().sort({ updatedAt: -1 }).lean();
-  const age = doc ? (now - new Date(doc.updatedAt)) : RATE_TTL_MS + 1;
-  if (!doc || age >= RATE_TTL_MS) {
+  const age = doc ? (now - new Date(doc.updatedAt)) : (RATE_TTL_MS || 1) + 1;
+  const stale = !doc || RATE_TTL_MS <= 0 || age >= RATE_TTL_MS;
+  if (stale) {
     console.log('[currency] Rates stale or missing (age ms:', age, '), refreshing from exchange API');
     const rates = await fetchRatesFromApi();
     if (doc) {
@@ -95,7 +124,7 @@ async function getOrCreateRates() {
   } else {
     console.log('[currency] Serving conversion rates from DB cache (age ms:', age, ')');
   }
-  return doc.rates;
+  return sanitizeRates(doc.rates);
 }
 
 /**
@@ -107,10 +136,10 @@ async function getRates() {
   const doc = await CurrencyExchangeRate.findOne().sort({ updatedAt: -1 }).lean();
   if (doc && doc.rates) {
     console.log('[currency] getRates: from DB, updatedAt:', doc.updatedAt);
-    return normalizeRates(doc.rates);
+    return normalizeRates(sanitizeRates(doc.rates));
   }
   console.log('[currency] getRates: no document, using hardcoded fallback');
-  return normalizeRates(DEFAULT_RATES);
+  return normalizeRates(applyMarkup(sanitizeRates(DEFAULT_RATES)));
 }
 
 /**
@@ -130,6 +159,5 @@ module.exports = {
   getRates,
   convert,
   normalizeRates,
-  applyRateMarkup,
   RATE_TTL_MS
 };

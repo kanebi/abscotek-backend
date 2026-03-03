@@ -16,10 +16,11 @@ async function getRates(req, res) {
     });
   } catch (err) {
     console.error('getRates:', err);
-    const fallback = { USDC: 1, USD: 1, NGN: 1500, EUR: 0.92, GHS: 15 };
     res.status(500).json({
       base: 'USD',
-      rates: currencyExchangeService.normalizeRates(currencyExchangeService.applyRateMarkup(fallback))
+      rates: currencyExchangeService.normalizeRates({
+        USDC: 1, USD: 1, NGN: 1500, EUR: 0.92, GHS: 15
+      })
     });
   }
 }

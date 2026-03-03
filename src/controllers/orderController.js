@@ -793,6 +793,10 @@ const getOrders = async (req, res) => {
         total: orderObj.calculatedTotal || orderObj.totalAmount
       };
 
+      // Paid currency: Seerbit is always NGN; use order.currency otherwise (no conversion of amounts)
+      const displayCurrency = (orderObj.paymentMethod === 'seerbit') ? 'NGN' : (orderObj.currency || 'USDC');
+      orderObj.currency = displayCurrency;
+
       // Ensure all items have unitPrice and enrich from productSnapshot (same as getOrdersPaginated / getOrderById)
       const PLACEHOLDER = '/images/desktop-1.png';
       if (orderObj.items && orderObj.items.length > 0) {
@@ -811,15 +815,16 @@ const getOrders = async (req, res) => {
           }
           if (images.length === 0) images = [PLACEHOLDER];
           const name = (snap?.name && String(snap.name).trim()) || itemObj.productName || itemObj.product?.name || 'Product';
-          const price = snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price;
-          const itemCurrency = itemObj.currency || snap?.currency || orderObj.currency || 'USDC';
+          const priceCandidates = [itemObj.unitPrice, itemObj.price, snap?.price, itemObj.product?.price].filter(v => v != null && Number(v) > 0);
+          const price = priceCandidates.length > 0 ? priceCandidates[0] : (snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price ?? 0);
           itemObj.product = {
             _id: productId,
             name,
-            price: price ?? itemObj.unitPrice,
+            price: price ?? 0,
             images,
-            currency: itemCurrency
+            currency: displayCurrency
           };
+          itemObj.currency = displayCurrency;
           return itemObj;
         }));
 
@@ -837,13 +842,15 @@ const getOrders = async (req, res) => {
         if (itemImages.length === 0) itemImages = [PLACEHOLDER];
 
         const productName = (snap?.name && String(snap.name).trim()) || firstItem.productName || firstItem.product?.name || 'Product';
+        const firstPriceCandidates = [firstItem.unitPrice, firstItem.price, snap?.price, firstItem.product?.price].filter(v => v != null && Number(v) > 0);
+        const firstPrice = firstPriceCandidates.length > 0 ? firstPriceCandidates[0] : (snap?.price ?? firstItem.unitPrice ?? firstItem.price ?? 0);
         orderObj.product = {
           name: productName,
           variant: firstItem.variant?.name || '',
           quantity: firstItem.quantity || 1,
-          price: snap?.price ?? firstItem.unitPrice ?? firstItem.price,
-          unitPrice: firstItem.unitPrice ?? firstItem.price,
-          currency: firstItem.currency || snap?.currency || orderObj.currency || 'USDC',
+          price: firstPrice,
+          unitPrice: firstPrice,
+          currency: displayCurrency,
           images: itemImages,
           productId: snap?.productId?.toString() || firstItem.product?._id?.toString() || null
         };
@@ -947,6 +954,10 @@ const getOrderById = async (req, res) => {
       total: orderObj.calculatedTotal || orderObj.totalAmount
     };
 
+    // Paid currency: Seerbit is always NGN; use order.currency otherwise (no conversion of amounts)
+    const displayCurrency = (orderObj.paymentMethod === 'seerbit') ? 'NGN' : (orderObj.currency || 'USDC');
+    orderObj.currency = displayCurrency;
+
     // Ensure all items have unitPrice and process items for frontend (snapshot-first; fallback to Product fetch for images)
     const PLACEHOLDER_IMG = '/images/desktop-1.png';
     if (orderObj.items && orderObj.items.length > 0) {
@@ -966,19 +977,19 @@ const getOrderById = async (req, res) => {
         if (images.length === 0) images = [PLACEHOLDER_IMG];
         const name = (snap?.name && String(snap.name).trim()) || itemObj.productName || itemObj.product?.name || 'Product';
         const description = snap?.description ?? itemObj.product?.description ?? null;
-        // Use stored unitPrice; use order currency so amount is never wrong (order was placed in one currency)
-        const priceRaw = itemObj.unitPrice ?? snap?.price ?? itemObj.product?.price;
+        // Prefer unitPrice/price when > 0; otherwise use snapshot (snapshot has price at order time)
+        const priceCandidates = [itemObj.unitPrice, itemObj.price, snap?.price, itemObj.product?.price].filter(v => v != null && Number(v) > 0);
+        const priceRaw = priceCandidates.length > 0 ? priceCandidates[0] : (snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price ?? 0);
         const price = (typeof priceRaw === 'number' && !Number.isNaN(priceRaw)) ? priceRaw : (Number(priceRaw) || 0);
-        const orderCurrency = orderObj.currency || 'USDC';
         itemObj.product = {
           _id: productId,
           name,
           description,
           price,
           images,
-          currency: orderCurrency
+          currency: displayCurrency
         };
-        itemObj.currency = orderCurrency;
+        itemObj.currency = displayCurrency;
         return itemObj;
       }));
 
@@ -994,7 +1005,9 @@ const getOrderById = async (req, res) => {
         } catch (_) { /* ignore */ }
       }
       if (firstImages.length === 0) firstImages = [PLACEHOLDER_IMG];
-      const firstPriceRaw = firstItem.unitPrice ?? firstItem.price ?? snap?.price;
+      // Prefer unitPrice/price when > 0; otherwise use snapshot so we don't show 0 when snapshot has price
+      const firstPriceCandidates = [firstItem.unitPrice, firstItem.price, snap?.price, firstItem.product?.price].filter(v => v != null && Number(v) > 0);
+      const firstPriceRaw = firstPriceCandidates.length > 0 ? firstPriceCandidates[0] : (snap?.price ?? firstItem.unitPrice ?? firstItem.product?.price ?? 0);
       const firstPrice = (typeof firstPriceRaw === 'number' && !Number.isNaN(firstPriceRaw)) ? firstPriceRaw : (Number(firstPriceRaw) || 0);
       orderObj.product = {
         name: (snap?.name && String(snap.name).trim()) || firstItem.productName || firstItem.product?.name || 'Product',
@@ -1005,7 +1018,7 @@ const getOrderById = async (req, res) => {
         description: snap?.description ?? firstItem.product?.description ?? null,
         images: firstImages,
         productId: snap?.productId?.toString() || firstItem.product?._id?.toString(),
-        currency: orderObj.currency || 'USDC'
+        currency: displayCurrency
       };
     }
 
@@ -1146,11 +1159,13 @@ const getOrderByNumber = async (req, res) => {
         const itemObj = item.toObject ? item.toObject() : item;
         const snap = itemObj.productSnapshot;
         const images = (snap?.images?.length > 0) ? snap.images : (itemObj.productImage ? [itemObj.productImage] : (itemObj.product?.images?.length > 0 ? itemObj.product.images : [PLACEHOLDER_IMAGE]));
+        const priceCandidates = [itemObj.unitPrice, itemObj.price, snap?.price, itemObj.product?.price].filter(v => v != null && Number(v) > 0);
+        const itemPrice = priceCandidates.length > 0 ? priceCandidates[0] : (snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price ?? 0);
         itemObj.product = {
           _id: snap?.productId || itemObj.product?._id,
           name: snap?.name || itemObj.productName || itemObj.product?.name || 'Product',
           description: snap?.description ?? itemObj.product?.description ?? null,
-          price: snap?.price ?? itemObj.unitPrice ?? itemObj.product?.price,
+          price: itemPrice,
           images,
           currency: snap?.currency || itemObj.currency
         };
@@ -1180,11 +1195,13 @@ const getOrderByNumber = async (req, res) => {
           if (currentProduct?.images?.length > 0) firstImages = currentProduct.images;
         } catch (_) { /* ignore */ }
       }
+      const firstPriceCandidates = [firstItem.unitPrice, firstItem.price, snap?.price, firstItem.product?.price].filter(v => v != null && Number(v) > 0);
+      const firstPrice = firstPriceCandidates.length > 0 ? firstPriceCandidates[0] : (snap?.price ?? firstItem.unitPrice ?? firstItem.product?.price ?? 0);
       orderObj.product = {
         name: (snap?.name && String(snap.name).trim()) || firstItem.productName || firstItem.product?.name || 'Product',
         variant: firstItem.variant?.name || '',
         quantity: firstItem.quantity,
-        price: firstItem.unitPrice,
+        price: firstPrice,
         description: snap?.description ?? firstItem.product?.description ?? null,
         images: firstImages,
         productId: snap?.productId?.toString() || firstItem.product?._id?.toString()
@@ -2030,6 +2047,10 @@ const getOrdersPaginated = async (req, res) => {
         total: orderObj.totalAmount
       };
 
+      // Paid currency: Seerbit is always NGN; use order.currency otherwise (no conversion of amounts)
+      const displayCurrency = (orderObj.paymentMethod === 'seerbit') ? 'NGN' : (orderObj.currency || 'USDC');
+      orderObj.currency = displayCurrency;
+
       // Flatten product data for frontend compatibility.
       // Prefer productSnapshot (stored at order time) so we don't depend on Product populate.
       if (orderObj.items && orderObj.items.length > 0) {
@@ -2058,14 +2079,16 @@ const getOrdersPaginated = async (req, res) => {
 
         const productName = (snap?.name && String(snap.name).trim()) || (firstItem.productName && String(firstItem.productName).trim()) || (firstItem.product?.name && String(firstItem.product.name).trim()) || 'Product';
         const productDesc = snap?.description ?? firstItem.product?.description ?? null;
+        const firstPriceCandidates = [firstItem.unitPrice, firstItem.price, snap?.price, firstItem.product?.price].filter(v => v != null && Number(v) > 0);
+        const firstPrice = firstPriceCandidates.length > 0 ? firstPriceCandidates[0] : (snap?.price ?? firstItem.unitPrice ?? firstItem.product?.price ?? 0);
 
         orderObj.product = {
           name: productName,
           description: productDesc,
           variant: firstItem.variant?.name || '',
           quantity: firstItem.quantity || 1,
-          price: snap?.price ?? firstItem.unitPrice ?? 0,
-          currency: firstItem.currency || snap?.currency || orderObj.currency || 'USDC',
+          price: firstPrice,
+          currency: displayCurrency,
           images: itemImages,
           productId: snap?.productId?.toString() || firstItem.product?._id?.toString() || null
         };
@@ -2076,7 +2099,7 @@ const getOrdersPaginated = async (req, res) => {
           variant: '',
           quantity: 1,
           price: orderObj.totalAmount || 0,
-          currency: orderObj.currency || 'USDC',
+          currency: displayCurrency,
           images: ['/images/desktop-1.png']
         };
       }
@@ -2194,11 +2217,14 @@ const cancelOrder = async (req, res) => {
 
     if (orderObj.items && orderObj.items.length > 0) {
       const firstItem = orderObj.items[0];
+      const snap = firstItem.productSnapshot;
+      const firstPriceCandidates = [firstItem.unitPrice, firstItem.price, snap?.price, firstItem.product?.price].filter(v => v != null && Number(v) > 0);
+      const firstPrice = firstPriceCandidates.length > 0 ? firstPriceCandidates[0] : (snap?.price ?? firstItem.unitPrice ?? firstItem.product?.price ?? 0);
       orderObj.product = {
         name: firstItem.productName || firstItem.product?.name || 'Product',
         variant: firstItem.variant?.name || '',
         quantity: firstItem.quantity,
-        price: firstItem.unitPrice,
+        price: firstPrice,
         images: firstItem.product?.images || []
       };
     }

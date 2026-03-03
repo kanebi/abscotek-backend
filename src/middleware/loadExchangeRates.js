@@ -1,6 +1,6 @@
 /**
- * Ensures platform exchange rates are loaded and refreshed every 24h.
- * In-memory cache; one in-flight getOrCreateRates so we don't hammer the DB/API.
+ * Ensures platform exchange rates are loaded. When RATE_TTL_MS is 0, no caching (always fresh from provider).
+ * In-memory cache disabled when TTL is 0; one in-flight getOrCreateRates to avoid duplicate requests.
  */
 const currencyExchangeService = require('../services/currencyExchangeService');
 
@@ -11,7 +11,8 @@ let loadPromise = null;
 async function loadExchangeRates(req, res, next) {
   try {
     const now = Date.now();
-    if (cachedRates && (now - cacheTime) < currencyExchangeService.RATE_TTL_MS) {
+    const useCache = currencyExchangeService.RATE_TTL_MS > 0 && cachedRates && (now - cacheTime) < currencyExchangeService.RATE_TTL_MS;
+    if (useCache) {
       req.platformRates = cachedRates;
       return next();
     }
