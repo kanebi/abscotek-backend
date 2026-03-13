@@ -1399,10 +1399,11 @@ const adminUpdateOrder = async (req, res) => {
     if (!order) return res.status(404).json({ msg: 'Order not found' });
 
     const previousStatus = order.status;
+    let statusLower = order.status;
 
     if (status) {
       const validStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'];
-      const statusLower = status.toLowerCase();
+      statusLower = status.toLowerCase();
       if (!validStatuses.includes(statusLower)) {
         return res.status(400).json({ msg: 'Invalid order status' });
       }
@@ -1447,8 +1448,8 @@ const adminUpdateOrder = async (req, res) => {
 
     await order.save();
 
-    // Send status change email when moving to processing, shipped, or delivered (not pending -> confirmed)
-    if (status && previousStatus !== statusLower && ['processing', 'shipped', 'delivered'].includes(statusLower)) {
+    // Send status change email when moving to processing, shipped, or delivered
+    if (previousStatus !== statusLower && ['processing', 'shipped', 'delivered'].includes(statusLower)) {
       try {
         const orderWithBuyer = await Order.findById(order._id).populate('buyer', ['name', 'email']);
         const { sendOrderStatusChangeEmail } = require('../email');
@@ -1653,6 +1654,28 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
       existingOrder.paymentReference = refStr;
       await existingOrder.save({ session });
 
+      // Giveaway delivery payment: create GiveawayClaim and mark item claimed
+      if (existingOrder.isGiveaway && existingOrder.giveawayId && existingOrder.giveawayProductId) {
+        const GiveawayClaim = require('../models/GiveawayClaim');
+        const Giveaway = require('../models/Giveaway');
+        const buyerId = existingOrder.buyer._id || existingOrder.buyer;
+        const claimDoc = new GiveawayClaim({
+          giveaway: existingOrder.giveawayId,
+          product: existingOrder.giveawayProductId,
+          user: buyerId,
+          order: existingOrder._id,
+        });
+        await claimDoc.save({ session });
+        const giveaway = await Giveaway.findById(existingOrder.giveawayId).session(session);
+        if (giveaway) {
+          const gwItem = giveaway.items.find((i) => i.product && i.product.toString() === existingOrder.giveawayProductId.toString());
+          if (gwItem) {
+            gwItem.claimed = true;
+            await giveaway.save({ session });
+          }
+        }
+      }
+
       // Avoid duplicate payment records
       const existingPayment = await Payment.findOne({ seerbitReference: refStr }).session(session);
       if (!existingPayment) {
@@ -1672,7 +1695,7 @@ const verifyPaymentAndCreateOrder = async (req, res) => {
         await existingOrder.save({ session });
       }
 
-      if (cart && activeItems.length > 0) {
+      if (!existingOrder.isGiveaway && cart && activeItems.length > 0) {
         const orderedProductIds = new Set(activeItems.map(a => (a.productId || (a.product && (a.product._id || a.product)))?.toString()).filter(Boolean));
         cart.items = (cart.items || []).map(item => {
           const itemObj = item.toObject ? item.toObject() : { ...item };
@@ -3016,6 +3039,28 @@ const confirmCryptoPayment = async (req, res) => {
 
     const { markOrderPaidAndComplete } = require('../jobs/paymentVerificationJob');
     await markOrderPaidAndComplete(order);
+
+    // Giveaway delivery payment: create GiveawayClaim and mark item claimed
+    if (order.isGiveaway && order.giveawayId && order.giveawayProductId) {
+      const GiveawayClaim = require('../models/GiveawayClaim');
+      const Giveaway = require('../models/Giveaway');
+      const buyerId = order.buyer._id || order.buyer;
+      const claimDoc = new GiveawayClaim({
+        giveaway: order.giveawayId,
+        product: order.giveawayProductId,
+        user: buyerId,
+        order: order._id,
+      });
+      await claimDoc.save();
+      const giveaway = await Giveaway.findById(order.giveawayId);
+      if (giveaway) {
+        const item = giveaway.items.find((i) => i.product && i.product.toString() === order.giveawayProductId.toString());
+        if (item) {
+          item.claimed = true;
+          await giveaway.save();
+        }
+      }
+    }
 
     try {
       const { sendOrderConfirmationEmail } = require('../email');

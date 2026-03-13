@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../../middleware/auth');
 const {
+  getReferrerByCode,
   generateReferralLink,
   getReferredUsers,
 } = require('../../controllers/referralController');
@@ -12,6 +13,26 @@ const {
  *   name: Referrals
  *   description: Referral program management
  */
+
+/**
+ * @swagger
+ * /api/referrals/referrer/{code}:
+ *   get:
+ *     summary: Get referrer by code (public)
+ *     description: Returns display name for the referrer for the referral landing page.
+ *     tags: [Referrals]
+ *     parameters:
+ *       - in: path
+ *         name: code
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: { displayName, referralCode }
+ *       404:
+ *         description: Invalid or expired referral link
+ */
+router.get('/referrer/:code', getReferrerByCode);
 
 /**
  * @swagger

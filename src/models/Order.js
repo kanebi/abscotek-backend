@@ -168,6 +168,10 @@ const OrderSchema = new mongoose.Schema({
     type: String,
     sparse: true
   },
+  paidDeliveryByUser: {
+    type: Boolean,
+    default: false
+  },
   notes: {
     type: String,
     default: ''
@@ -185,8 +189,28 @@ const OrderSchema = new mongoose.Schema({
   // Crypto payment fields
   paymentMethod: {
     type: String,
-    enum: ['wallet', 'paystack', 'seerbit', 'crypto', 'card'],
+    enum: ['wallet', 'paystack', 'seerbit', 'crypto', 'card', 'giveaway'],
     default: 'wallet'
+  },
+  isGiveaway: {
+    type: Boolean,
+    default: false
+  },
+  // Giveaway orders only: pay delivery when item is delivered (do not collect now)
+  paymentOnDelivery: {
+    type: Boolean,
+    default: false
+  },
+  // When giveaway order is created via crypto payment flow, store refs to create GiveawayClaim after payment
+  giveawayId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Giveaway',
+    default: null
+  },
+  giveawayProductId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    default: null
   },
   paymentReference: {
     type: String,

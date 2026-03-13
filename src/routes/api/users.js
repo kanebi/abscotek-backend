@@ -13,6 +13,7 @@ const jwt = require('jsonwebtoken');
 const jwtSecret = process.env.JWT_SECRET || 'supersecretjwttoken';
 const auth = require('../../middleware/auth');
 const User = require('../../models/User');
+const Referral = require('../../models/Referral');
 const { Order } = require('../../models/Order');
 const blockchainPaymentService = require('../../services/blockchainPaymentService');
 
@@ -41,10 +42,19 @@ router.post(
         return res.status(400).json({ errors: [{ msg: 'User already exists' }] });
       }
 
+      let referredBy = null;
+      if (referralCode) {
+        const referral = await Referral.findOne({ referralCode }).select('referrer');
+        if (referral && referral.referrer) {
+          referredBy = referral.referrer;
+        }
+      }
+
       user = new User({
         name,
         email,
         password,
+        referredBy,
       });
 
       const salt = await bcrypt.genSalt(10);

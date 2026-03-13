@@ -22,15 +22,10 @@ const extractUserInfo = async (req) => {
     } catch (err) {
       // Not a local JWT, try Privy JWT verification using direct REST API (Origin required by Privy)
       try {
-        const frontendOrigin = (process.env.FRONTEND_URL || process.env.PRIVY_ORIGIN || 'http://localhost:5173').replace(/\/$/, '');
+        const { getPrivyUserMeHeaders } = require('../config/privy');
         const response = await fetch('https://api.privy.io/v1/users/me', {
           method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'privy-app-id': process.env.PRIVY_APP_ID,
-            'Content-Type': 'application/json',
-            'Origin': frontendOrigin
-          }
+          headers: getPrivyUserMeHeaders(token)
         });
 
         if (response.ok) {

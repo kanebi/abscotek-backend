@@ -27,6 +27,8 @@ require('./src/models/DeliveryAddress');
 require('./src/models/DeliveryMethod');
 require('./src/models/Wishlist');
 require('./src/models/Referral');
+require('./src/models/Giveaway');
+require('./src/models/GiveawayClaim');
 require('./src/models/UserVerification');
 require('./src/models/CurrencyExchangeRate');
 
@@ -114,6 +116,8 @@ app.use('/api/wishlist', require('./src/routes/api/wishlist'));
 app.use('/api/delivery-methods', require('./src/routes/api/delivery-methods'));
 app.use('/api/delivery-addresses', require('./src/routes/api/delivery-addresses'));
 app.use('/api/referrals', require('./src/routes/api/referrals'));
+app.use('/api/giveaways', require('./src/routes/api/giveaways'));
+app.use('/api/admin/giveaways', require('./src/routes/api/adminGiveaways'));
 app.use('/api/webhooks', require('./src/routes/api/webhooks'));
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 

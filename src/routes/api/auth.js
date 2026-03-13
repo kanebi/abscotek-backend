@@ -41,6 +41,7 @@ const auth = require('../../middleware/auth');
 // Using direct REST API approach instead of PrivyClient
 
 const User = require('../../models/User');
+const Referral = require('../../models/Referral');
 
 /**
  * @swagger
@@ -217,22 +218,17 @@ router.post(
  */
 router.post('/privy', async (req, res) => {
   console.log('POST /api/auth/privy');
-  const { accessToken } = req.body;
+  const { accessToken, referralCode } = req.body;
 
   if (!accessToken) {
     return res.status(400).json({ errors: [{ msg: 'Access token is required' }] });
   }
 
   try {
-    const frontendOrigin = (process.env.FRONTEND_URL || process.env.PRIVY_ORIGIN || 'http://localhost:5173').replace(/\/$/, '');
+    const { getPrivyUserMeHeaders } = require('../../config/privy');
     const response = await fetch('https://api.privy.io/v1/users/me', {
       method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'privy-app-id': process.env.PRIVY_APP_ID,
-        'Content-Type': 'application/json',
-        'Origin': frontendOrigin
-      }
+      headers: getPrivyUserMeHeaders(accessToken)
     });
     
     if (!response.ok) {
@@ -273,7 +269,14 @@ router.post('/privy', async (req, res) => {
         await existingUser.save();
         user = existingUser;
       } else {
-        // Create new user with Privy data
+        // Create new user with Privy data; tie to referrer if referralCode provided
+        let referredBy = null;
+        if (referralCode) {
+          const referral = await Referral.findOne({ referralCode }).select('referrer');
+          if (referral && referral.referrer) {
+            referredBy = referral.referrer;
+          }
+        }
         user = new User({
           privyUserId,
           walletAddress,
@@ -281,6 +284,7 @@ router.post('/privy', async (req, res) => {
           name,
           role: 'user',
           linked: true, // Mark as linked to Privy
+          referredBy,
         });
         await user.save();
       }

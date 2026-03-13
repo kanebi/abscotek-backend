@@ -5,6 +5,34 @@ const { v4: uuidv4 } = require('uuid');
 
 const REFERRAL_REWARD_AMOUNT = 4; // 4 USDC
 
+// @desc    Get referrer display info by referral code (public, for /refer/:id landing)
+// @route   GET /api/referrals/referrer/:code
+// @access  Public
+const getReferrerByCode = async (req, res) => {
+  try {
+    const { code } = req.params;
+    if (!code) {
+      return res.status(400).json({ errors: [{ msg: 'Referral code is required' }] });
+    }
+    const referral = await Referral.findOne({ referralCode: code }).populate('referrer', 'name email walletAddress');
+    if (!referral || !referral.referrer) {
+      return res.status(404).json({ errors: [{ msg: 'Invalid or expired referral link' }] });
+    }
+    const referrer = referral.referrer;
+    const displayName =
+      referrer.name ||
+      referrer.email ||
+      (referrer.walletAddress
+        ? `${referrer.walletAddress.slice(0, 6)}...${referrer.walletAddress.slice(-4)}`
+        : null) ||
+      'Someone';
+    res.json({ displayName, referralCode: code, referrerId: referrer._id.toString() });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ errors: [{ msg: 'Server error' }] });
+  }
+};
+
 // @desc    Generate a referral link for the authenticated user
 // @route   POST /api/referrals/generate
 // @access  Private
@@ -194,6 +222,7 @@ const getWithdrawals = async (req, res) => {
 };
 
 module.exports = {
+  getReferrerByCode,
   generateReferralLink,
   getReferredUsers,
   getReferralStats,

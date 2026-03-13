@@ -41,7 +41,8 @@
     "test:server": "node tests/server.test.js",
     "test:jwt": "node tests/jwt.test.js",
     "test:all": "node tests/run-all.js",
-    "migrate:order-product-snapshot": "node scripts/migrate-order-product-snapshot.js"
+    "migrate:order-product-snapshot": "node scripts/migrate-order-product-snapshot.js",
+    "seed:giveaway-newcomers": "node scripts/seed-giveaway-newcomers.js"
   },
   "keywords": [],
   "author": "",
